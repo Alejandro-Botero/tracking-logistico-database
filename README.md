@@ -15,7 +15,9 @@ se sincronizan por un patrón outbox, no por acceso directo al otro schema.
 ## Migraciones
 
 ```
-migrations/   8 migraciones, en orden de ejecución por su timestamp
+supabase/
+  config.toml     configuración del proyecto Supabase CLI (schemas expuestos, puertos locales)
+  migrations/     8 migraciones, en orden de ejecución por su timestamp
 ```
 
 | Migración | Contenido |
@@ -29,15 +31,24 @@ migrations/   8 migraciones, en orden de ejecución por su timestamp
 | `permisos_y_aislamiento` | GRANT explícitos + RLS entre los dos roles de servicio |
 | `procesos_externos` | Outbox y sincronización del catálogo entre servicios |
 
-## Aplicar a Supabase
+## Desarrollo local
+
+Requiere Docker y la [Supabase CLI](https://supabase.com/docs/guides/cli).
 
 ```bash
 npm install -g supabase
+supabase start        # levanta Postgres + Studio local usando supabase/config.toml
+supabase db reset     # aplica las migraciones de supabase/migrations/ desde cero
+```
+
+## Aplicar a un proyecto remoto
+
+```bash
 supabase login
 supabase link --project-ref <ref-del-proyecto>
 supabase db push
 ```
 
-Ajuste manual en el panel de Supabase: **API → Exposed schemas** debe dejar solo
-`public` — los schemas `envios`/`eventos` no se publican por PostgREST, el
-cliente entra por los microservicios.
+`supabase/config.toml` ya deja `schemas = ["public"]` en `[api]`, así que
+`supabase db push`/`supabase link` no exponen `envios`/`eventos` por
+PostgREST — el cliente entra por los microservicios, no por la API pública.

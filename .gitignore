@@ -1,7 +1,1 @@
-# Credenciales reales de los microservicios: se generan por entorno, no se versionan.
-scripts/crear_usuarios_servicio.sql
 .env
-
-# Supabase CLI
-.branches/
-.temp/

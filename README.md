@@ -5,7 +5,8 @@ FedEx, sobre Supabase/PostgreSQL. Cubre HU-01 a HU-07 del backlog.
 
 ## Esquema
 
-![Esquema del modelo de datos](esquema.png)
+![Schema envios](esquema-envios.png)
+![Schema eventos](esquema-eventos.png)
 
 Un solo Postgres, dos schemas con dueño explícito y un rol de base de datos por
 servicio: `envios` (MS-Envíos) y `eventos` (MS-Eventos). Cada servicio replica

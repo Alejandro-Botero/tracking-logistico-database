@@ -1,33 +1,37 @@
-1. ¿Qué envíos siguen activos (sin cerrar) en la red?
+1. ¿Qué envíos siguen activos (no entregados) en la red?
 
-SELECT tracking_number, estado_actual, registrado_en
+SELECT numero_seguimiento, estado, fecha_registro
 FROM envios.envio
-WHERE cerrado_en IS NULL;
+WHERE estado <> 'ENTREGADO';
 
 2. ¿Quién es el remitente y el destinatario de un envío dado su número de seguimiento?
 
-SELECT e.tracking_number, p.rol, p.nombre, p.telefono
-FROM envios.envio e
-JOIN envios.parte p ON p.envio_id = e.id
-WHERE e.tracking_number = 'FDX000000000001';
+SELECT numero_seguimiento,
+       remitente_nombre, remitente_telefono,
+       destinatario_nombre, destinatario_telefono
+FROM envios.envio
+WHERE numero_seguimiento = 'ENV-20260914-UDQXT';
 
 3. ¿Cuántos envíos hay en cada estado actualmente?
 
-SELECT estado_actual, COUNT(*) AS total
+SELECT estado, COUNT(*) AS total
 FROM envios.envio
-GROUP BY estado_actual
+GROUP BY estado
 ORDER BY total DESC;
 
 4. ¿Qué envíos fueron entregados en un periodo específico?
 
-SELECT tracking_number, ocurrido_en, recibido_por
-FROM eventos.evento
-WHERE tipo_evento = 'ENTREGADO'
-  AND ocurrido_en >= '2026-09-01'
-  AND ocurrido_en <  '2026-09-14';
+SELECT e.numero_seguimiento, ev.fecha_hora, ev.receptor
+FROM eventos.evento ev
+JOIN envios.envio e ON e.id = ev.envio_id
+WHERE ev.tipo_evento = 'ENTREGADO'
+  AND ev.fecha_hora >= '2026-09-01'
+  AND ev.fecha_hora <  '2026-09-14';
 
 5. ¿Cuál fue el último evento registrado para cada envío?
 
-SELECT DISTINCT ON (envio_id) envio_id, tracking_number, tipo_evento, ocurrido_en
-FROM eventos.evento
-ORDER BY envio_id, ocurrido_en DESC;
+SELECT DISTINCT ON (ev.envio_id)
+       ev.envio_id, e.numero_seguimiento, ev.tipo_evento, ev.fecha_hora
+FROM eventos.evento ev
+JOIN envios.envio e ON e.id = ev.envio_id
+ORDER BY ev.envio_id, ev.fecha_hora DESC;

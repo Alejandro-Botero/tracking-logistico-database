@@ -73,6 +73,18 @@ microservicios separados.
 | `fecha_hora` | timestamp | not null, default `now()` |
 | `receptor` | varchar(150) | `CHECK`: obligatorio si `tipo_evento = 'ENTREGADO'` |
 
+## Normalización
+
+Las dos tablas cumplen BCNF, no solo 3FN. La diferencia entre ambas formas normales solo importa cuando una tabla tiene dos o más claves candidatas que comparten atributos entre sí — ahí es donde 3FN permite una excepción que BCNF no permite. Acá no pasa eso:
+
+- `envio` tiene dos claves candidatas (`id` y `numero_seguimiento`), pero no comparten ninguna columna, así que no hay excepción que aplicar.
+- `evento` solo tiene una clave candidata (`id`), así que el caso ni siquiera se puede dar.
+
+Por eso ambas están en BCNF directamente.
+
+Sobre las columnas `remitente_*` / `destinatario_*` en `envio`: se dejaron planas en vez de sacarlas a una tabla `persona` aparte. No es un problema de normalización — sigue cumpliendo BCNF igual — es que ninguna HU de este sprint pide reutilizar contactos entre envíos distintos. Si esa necesidad aparece en otro sprint, ahí se normaliza.
+
+
 ## Modelo físico
 
 [`schema.sql`](schema.sql) — script único con los dos schemas, las dos

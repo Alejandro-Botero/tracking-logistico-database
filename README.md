@@ -1,3 +1,13 @@
+### Integrantes
+
+* Alejandro Botero Arbeláez
+* Eyner Gomez Quintero
+* Jose Manuel Londoño Castaño
+* Ivan Dario López Cuadrado
+* Oliver Andres Quiroz Mora
+* Juan Daniel Rincon Bedoya
+
+
 # tracking-logistico-database
 
 Base de datos del sistema de tracking logístico — Fábrica Escuela, Sprint 1.

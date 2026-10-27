@@ -34,7 +34,13 @@ Cada índice hace más lenta la inserción, pero lo aceptamos: la tabla solo rec
 
 ### 1.1 Longitud del registro (L)
 
-Usamos $L = 4 \cdot \#\text{campos var.} + \sum \text{size(campos fijos)} + \text{size(mapa de bits)} + \sum \text{tamaño estimado(campos var.)}$.
+Usamos:
+
+```math
+L = 4 \cdot n_{var} + \sum \text{size(campos fijos)} + \text{size(mapa de bits)} + \sum \text{tamaño estimado(campos var.)}
+```
+
+donde $`n_{var}`$ es el número de campos de longitud variable.
 
 Campos de tamaño fijo:
 
@@ -62,35 +68,45 @@ Campos de tamaño variable (todos `text`), con el tamaño promedio que estimamos
 | `clave_idempotencia` | 18 | 36 bytes, en cerca de la mitad de los eventos |
 | Total | 101 | 7 campos |
 
-La tabla tiene 14 campos, así que el mapa de bits ocupa $\lceil 14/8 \rceil = 2$ bytes. Entonces:
+La tabla tiene 14 campos, así que el mapa de bits ocupa $`\lceil 14/8 \rceil = 2`$ bytes. Entonces:
 
-$$L = 4 \cdot 7 + 73 + 2 + 101 = 204 \text{ bytes}$$
+```math
+L = 4 \cdot 7 + 73 + 2 + 101 = 204 \text{ bytes}
+```
 
 ### 1.2 Registros por bloque y páginas de la tabla
 
-$$FR = \left\lfloor \frac{P-2}{4+L} \right\rfloor = \left\lfloor \frac{8192-2}{4+204} \right\rfloor = \left\lfloor \frac{8190}{208} \right\rfloor = 39$$
+```math
+FR = \left\lfloor \frac{P-2}{4+L} \right\rfloor = \left\lfloor \frac{8192-2}{4+204} \right\rfloor = \left\lfloor \frac{8190}{208} \right\rfloor = 39
+```
 
-Comprobamos con $P = 2 + 4 \cdot FR + FR \cdot L = 2 + 156 + 7956 = 8114$, que cabe en 8.192 bytes. Con 40 registros ya no cabría (8.322).
+Comprobamos con $`P = 2 + 4 \cdot FR + FR \cdot L = 2 + 156 + 7956 = 8114`$, que cabe en 8.192 bytes. Con 40 registros ya no cabría (8.322).
 
-$$BR = \left\lceil \frac{TR}{FR} \right\rceil = \left\lceil \frac{2160000}{39} \right\rceil = 55385 \text{ páginas}$$
+```math
+BR = \left\lceil \frac{TR}{FR} \right\rceil = \left\lceil \frac{2160000}{39} \right\rceil = 55385 \text{ páginas}
+```
 
-La tabla ocupa $55385 \times 8192 = 453\,713\,920$ bytes, unos 432,7 MiB.
+La tabla ocupa $`55385 \times 8192 = 453\,713\,920`$ bytes, unos 432,7 MiB.
 
 ### 1.3 Orden del árbol y altura del índice `idx_evento_envio`
 
-Cada entrada tiene la clave (`envio_id` 16 + `ocurrido_en` 8 + `secuencia` 8 = 32 bytes) más el puntero de 8, es decir, $L_{idx} = 40$ bytes. Entonces:
+Cada entrada tiene la clave (`envio_id` 16 + `ocurrido_en` 8 + `secuencia` 8 = 32 bytes) más el puntero de 8, es decir, $`L_{idx} = 40`$ bytes. Entonces:
 
-$$FR_{idx} = \left\lfloor \frac{B}{L_{idx}} \right\rfloor = \left\lfloor \frac{8192}{40} \right\rfloor = 204$$
+```math
+FR_{idx} = \left\lfloor \frac{B}{L_{idx}} \right\rfloor = \left\lfloor \frac{8192}{40} \right\rfloor = 204
+```
 
-De $2d - 1 = 204$ sale $d = 102{,}5$; tomamos $d = 102$, con lo que el nodo admite 203 entradas.
+De $`2d - 1 = 204`$ sale $`d = 102{,}5`$; tomamos $`d = 102`$, con lo que el nodo admite 203 entradas.
 
-La clave incluye `secuencia`, que es única, así que $V(a,R) = TR = 2160000$. La altura cumple:
+La clave incluye `secuencia`, que es única, así que $`V(a,R) = TR = 2160000`$. La altura cumple:
 
-$$H \le \log_{102} 2160000 = \frac{\ln 2160000}{\ln 102} = \frac{14{,}586}{4{,}625} = 3{,}15 \;\Rightarrow\; H = 4$$
+```math
+H \le \log_{102} 2160000 = \frac{\ln 2160000}{\ln 102} = \frac{14{,}586}{4{,}625} = 3{,}15 \;\Rightarrow\; H = 4
+```
 
 ### 1.4 Nodos y espacio del índice
 
-Contamos el nivel 1 como las hojas, y en cada nivel dividimos entre $d$ de nuevo (redondeando hacia arriba):
+Contamos el nivel 1 como las hojas, y en cada nivel dividimos entre $`d`$ de nuevo (redondeando hacia arriba):
 
 | Nivel | Cálculo | Nodos |
 |---|---|---|
@@ -100,7 +116,7 @@ Contamos el nivel 1 como las hojas, y en cada nivel dividimos entre $d$ de nuevo
 | 4 (raíz) | 2160000 / 102⁴ | 1 |
 | Total | | 21.389 |
 
-El espacio del índice es $21389 \times 8192 = 175\,218\,688$ bytes, unos 167,1 MiB, cerca del 39 % de lo que ocupa la tabla. Es una estimación por arriba: la fórmula supone nodos con el mínimo de entradas, y un B+tree real de PostgreSQL llena sus páginas cerca del 90 %, así que ocupará algo menos.
+El espacio del índice es $`21389 \times 8192 = 175\,218\,688`$ bytes, unos 167,1 MiB, cerca del 39 % de lo que ocupa la tabla. Es una estimación por arriba: la fórmula supone nodos con el mínimo de entradas, y un B+tree real de PostgreSQL llena sus páginas cerca del 90 %, así que ocupará algo menos.
 
 ## 2. Costo de una consulta
 
@@ -115,19 +131,23 @@ JOIN catalogo.punto_red pr ON pr.id = ev.punto_red_id
 WHERE ev.tracking_number = 'FDX000000012345';
 ```
 
-En álgebra relacional: $\pi_{ocurrido\_en,\,tipo\_evento,\,nombre}\big(\sigma_{tracking\_number = X}(\text{evento}) \bowtie_{punto\_red\_id = id} \text{punto\_red}\big)$
+En álgebra relacional:
+
+```math
+\pi_{ocurrido\_en,\,tipo\_evento,\,nombre}\big(\sigma_{tracking\_number = X}(\text{evento}) \bowtie_{punto\_red\_id = id} \text{punto\_red}\big)
+```
 
 ### 2.2 Estadísticas
 
-- $TR_{evento} = 2160000$ y $BR_{evento} = 55385$, de la sección 1.
-- $V(tracking\_number, evento) = 360000$: hay un número de seguimiento por envío.
-- $S(tracking\_number, evento) = TR / V = 2160000 / 360000 = 6$ eventos por envío.
-- $TS_{punto\_red} = 25$ puntos al cabo de un año, según la estimación de volumen.
-- $M = 10$ páginas de memoria.
+- $`TR_{evento} = 2160000`$ y $`BR_{evento} = 55385`$, de la sección 1.
+- $`V(tracking\_number, evento) = 360000`$: hay un número de seguimiento por envío.
+- $`S(tracking\_number, evento) = TR / V = 2160000 / 360000 = 6`$ eventos por envío.
+- $`TS_{punto\_red} = 25`$ puntos al cabo de un año, según la estimación de volumen.
+- $`M = 10`$ páginas de memoria.
 
-Altura del índice `idx_evento_tracking`: la entrada mide 15 + 8 = 23 bytes, entonces $FR = \lfloor 8192/23 \rfloor = 356$ y $d = \lfloor 357/2 \rfloor = 178$. Como $\log_{178} 360000 = 2{,}47$, la altura es $HI = 3$.
+Altura del índice `idx_evento_tracking`: la entrada mide 15 + 8 = 23 bytes, entonces $`FR = \lfloor 8192/23 \rfloor = 356`$ y $`d = \lfloor 357/2 \rfloor = 178`$. Como $`\log_{178} 360000 = 2{,}47`$, la altura es $`HI = 3`$.
 
-Páginas de `punto_red`: los campos fijos suman 25 bytes (`id` 16, `activo` 1, `creado_en` 8) y los 6 variables (`codigo`, `nombre`, `tipo`, `ciudad_codigo`, `latitud`, `longitud`) suman 77. Con un mapa de bits de $\lceil 9/8 \rceil = 2$ bytes: $L = 4 \cdot 6 + 25 + 2 + 77 = 128$. Entonces $FR = \lfloor 8190/132 \rfloor = 62$ y $BS = \lceil 25/62 \rceil = 1$: la tabla cabe en una página.
+Páginas de `punto_red`: los campos fijos suman 25 bytes (`id` 16, `activo` 1, `creado_en` 8) y los 6 variables (`codigo`, `nombre`, `tipo`, `ciudad_codigo`, `latitud`, `longitud`) suman 77. Con un mapa de bits de $`\lceil 9/8 \rceil = 2`$ bytes: $`L = 4 \cdot 6 + 25 + 2 + 77 = 128`$. Entonces $`FR = \lfloor 8190/132 \rfloor = 62`$ y $`BS = \lceil 25/62 \rceil = 1`$: la tabla cabe en una página.
 
 ### 2.3 Plan elegido
 
@@ -135,11 +155,15 @@ Primero se hace la selección con el índice y después la reunión por bucles a
 
 La selección usa un índice secundario, porque `tracking_number` se repite en varios eventos:
 
-$$\text{Costo} = HI + S(a,R) = 3 + 6 = 9 \text{ páginas}$$
+```math
+\text{Costo} = HI + S(a,R) = 3 + 6 = 9 \text{ páginas}
+```
 
-Quedan 6 tuplas, que caben en una página. Para la reunión, esa página es la tabla externa ($BR = 1$) y `punto_red` es la interna ($BS = 1$):
+Quedan 6 tuplas, que caben en una página. Para la reunión, esa página es la tabla externa ($`BR = 1`$) y `punto_red` es la interna ($`BS = 1`$):
 
-$$\text{Costo} = BR + BS \cdot \left\lceil \frac{BR}{M-2} \right\rceil = 1 + 1 \cdot \left\lceil \frac{1}{8} \right\rceil = 2 \text{ páginas}$$
+```math
+\text{Costo} = BR + BS \cdot \left\lceil \frac{BR}{M-2} \right\rceil = 1 + 1 \cdot \left\lceil \frac{1}{8} \right\rceil = 2 \text{ páginas}
+```
 
 Como `id` es llave de `punto_red`, el resultado tiene a lo sumo 6 tuplas. El costo total es 9 + 2 = 11 páginas de E/S.
 
@@ -147,12 +171,12 @@ Como `id` es llave de `punto_red`, el resultado tiene a lo sumo 6 tuplas. El cos
 
 | Plan | Cálculo | Páginas |
 |---|---|---|
-| A. Selección con índice y bucles anidados (el elegido) | $9 + 2$ | 11 |
-| B. Selección con índice y bucles anidados con índice sobre `punto_red.id` | $9 + (BT + TT \cdot S(b,R)) = 9 + (1 + 6 \cdot 1)$ | 16 |
-| C. Reunión sin selección previa, con `punto_red` como externa | $1 + 55385 \cdot \lceil 1/8 \rceil$ | 55.386 |
-| D. Reunión sin selección previa, con `evento` como externa | $55385 + \lceil 55385/8 \rceil = 55385 + 6924$ | 62.309 |
+| A. Selección con índice y bucles anidados (el elegido) | $`9 + 2`$ | 11 |
+| B. Selección con índice y bucles anidados con índice sobre `punto_red.id` | $`9 + (BT + TT \cdot S(b,R)) = 9 + (1 + 6 \cdot 1)`$ | 16 |
+| C. Reunión sin selección previa, con `punto_red` como externa | $`1 + 55385 \cdot \lceil 1/8 \rceil`$ | 55.386 |
+| D. Reunión sin selección previa, con `evento` como externa | $`55385 + \lceil 55385/8 \rceil = 55385 + 6924`$ | 62.309 |
 
-En el plan B, $S(id, punto\_red) = TS/V = 25/25 = 1$ porque `id` es llave.
+En el plan B, $`S(id, punto\_red) = TS/V = 25/25 = 1`$ porque `id` es llave.
 
 El plan A cuesta unas 5.000 veces menos que recorrer la tabla (55.386 / 11 ≈ 5.035). La diferencia está en aplicar primero la selección con `idx_evento_tracking`, que baja `evento` de 2.160.000 tuplas a 6 antes de la reunión. Entre A y B gana A porque `punto_red` cabe en una página y leerla entera cuesta menos que buscar cada tupla por el índice. No consideramos la reunión por mezcla ni la hash: con una relación de una página y otra de 6 tuplas no aportan nada.
 
@@ -172,15 +196,19 @@ WHERE ev.tracking_number = 'FDX000000012345'
 
 Expresión inicial, que primero reúne las dos tablas completas y filtra al final:
 
-$$\pi_{ocurrido\_en,\,tipo\_evento,\,nombre}\Big(\sigma_{tracking\_number = X \,\wedge\, tipo = CD}\big(\text{evento} \bowtie_{punto\_red\_id = id} \text{punto\_red}\big)\Big)$$
+```math
+\pi_{ocurrido\_en,\,tipo\_evento,\,nombre}\Big(\sigma_{tracking\_number = X \,\wedge\, tipo = CD}\big(\text{evento} \bowtie_{punto\_red\_id = id} \text{punto\_red}\big)\Big)
+```
 
 ### 3.2 Transformaciones
 
-1. Ley 2 (selección conjunta), $\sigma_{p_1 \wedge p_2}(E) \equiv \sigma_{p_1}(\sigma_{p_2}(E))$: separamos la conjunción en dos selecciones, una por predicado.
+1. Ley 2 (selección conjunta), $`\sigma_{p_1 \wedge p_2}(E) \equiv \sigma_{p_1}(\sigma_{p_2}(E))`$: separamos la conjunción en dos selecciones, una por predicado.
 
-2. Leyes 4 y 5 (selección sobre una reunión), $\sigma_p(E_1 \bowtie E_2) \equiv \sigma_{p_1}(E_1) \bowtie \sigma_{p_2}(E_2)$: `tracking_number` pertenece solo a `evento` y `tipo` solo a `punto_red`, así que cada selección baja a su relación:
+2. Leyes 4 y 5 (selección sobre una reunión), $`\sigma_p(E_1 \bowtie E_2) \equiv \sigma_{p_1}(E_1) \bowtie \sigma_{p_2}(E_2)`$: `tracking_number` pertenece solo a `evento` y `tipo` solo a `punto_red`, así que cada selección baja a su relación:
 
-$$\pi_{\ldots}\Big(\sigma_{tracking\_number = X}(\text{evento}) \bowtie \sigma_{tipo = CD}(\text{punto\_red})\Big)$$
+```math
+\pi_{\ldots}\Big(\sigma_{tracking\_number = X}(\text{evento}) \bowtie \sigma_{tipo = CD}(\text{punto\_red})\Big)
+```
 
 3. Ley 9 (proyección sobre una reunión) y Ley 8 (proyecciones en cascada): proyectamos antes de la reunión solo lo que hace falta, conservando los atributos de la reunión (`punto_red_id` e `id`). La proyección final descarta esos atributos de enlace.
 
@@ -188,7 +216,9 @@ La Ley 3 no la usamos, porque `tracking_number` no está en la proyección final
 
 ### 3.3 Expresión optimizada
 
-$$\pi_{ocurrido\_en,\,tipo\_evento,\,nombre}\Big(\pi_{ocurrido\_en,\,tipo\_evento,\,punto\_red\_id}\big(\sigma_{tracking\_number = X}(\text{evento})\big) \bowtie \pi_{id,\,nombre}\big(\sigma_{tipo = CD}(\text{punto\_red})\big)\Big)$$
+```math
+\pi_{ocurrido\_en,\,tipo\_evento,\,nombre}\Big(\pi_{ocurrido\_en,\,tipo\_evento,\,punto\_red\_id}\big(\sigma_{tracking\_number = X}(\text{evento})\big) \bowtie \pi_{id,\,nombre}\big(\sigma_{tipo = CD}(\text{punto\_red})\big)\Big)
+```
 
 ### 3.4 Por qué es más barata
 

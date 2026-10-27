@@ -19,6 +19,7 @@ SET client_min_messages = warning;
 -- ---------------------------------------------------------------------
 DO $$
 BEGIN
+    IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'rol_admin')   THEN CREATE ROLE rol_admin   NOLOGIN; END IF;
     IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'ms_envios')   THEN CREATE ROLE ms_envios   NOLOGIN; END IF;
     IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'ms_eventos')  THEN CREATE ROLE ms_eventos  NOLOGIN; END IF;
     IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'rol_lectura') THEN CREATE ROLE rol_lectura NOLOGIN; END IF;
@@ -98,7 +99,7 @@ CREATE FUNCTION catalogo.verificar_rls() RETURNS TABLE(schema_tabla text, proble
      and grantee = 'PUBLIC';
 $$;
 
-COMMENT ON FUNCTION catalogo.verificar_rls() IS 'Devuelve cero filas si toda tabla de los tres schemas tiene RLS con política y nada quedó abierto a PUBLIC. Cualquier fila es un agujero de la migración que la abrió.';
+COMMENT ON FUNCTION catalogo.verificar_rls() IS 'Devuelve cero filas si toda tabla de los tres schemas tiene RLS con política y nada quedó abierto a PUBLIC. Cualquier fila es un agujero de seguridad por corregir.';
 
 CREATE FUNCTION catalogo.verificar_transicion() RETURNS trigger
     LANGUAGE plpgsql
@@ -271,7 +272,7 @@ COMMENT ON COLUMN envios.envio.registrado_por IS 'Operador que dio el alta, toma
 
 COMMENT ON COLUMN envios.envio.admitido_en IS 'Primer evento del envío: la entrada real a la red. El reloj del SLA arranca aquí y no en `registrado_en`, porque un envío dado de alta a las 5 p.m. en el mostrador no está en tránsito hasta que alguien lo recoge.';
 
-COMMENT ON COLUMN envios.envio.ultimo_evento_en IS 'Caché del último movimiento, mantenido por el trigger de la migración 005. Permite que HU-03 responda estado + punto + fecha en una sola lectura (NFR-09).';
+COMMENT ON COLUMN envios.envio.ultimo_evento_en IS 'Caché del último movimiento, mantenido por el trigger trg_evento_aplicar_estado. Permite que HU-03 responda estado + punto + fecha en una sola lectura (NFR-09).';
 
 COMMENT ON COLUMN envios.envio.cerrado_en IS 'Momento en que el envío llegó a un estado final, terminara como terminara. `entregado_en` solo se llena si ese final fue exitoso.';
 
@@ -588,7 +589,7 @@ COMMENT ON COLUMN eventos.evento.secuencia IS 'Orden de llegada al sistema. Dese
 
 COMMENT ON COLUMN eventos.evento.envio_id IS 'FK contra envios.envio. Es lo que hace que un evento sobre un número inexistente no se registre (HU-02, escenario 3) sin depender de una consulta previa del servicio.';
 
-COMMENT ON COLUMN eventos.evento.tracking_number IS 'Denormalizado a propósito: MS-Eventos resuelve la consulta por número sin cruzar al schema del otro servicio. Lo mantiene sincronizado el trigger de esta migración.';
+COMMENT ON COLUMN eventos.evento.tracking_number IS 'Denormalizado a propósito: MS-Eventos resuelve la consulta por número sin cruzar al schema del otro servicio. Lo mantiene sincronizado el trigger trg_evento_validar.';
 
 COMMENT ON COLUMN eventos.evento.estado_resultante IS 'Estado en que quedó el envío por este evento, resuelto contra catalogo.transicion_valida y guardado aquí. El historial queda legible aunque mañana cambien las reglas: dice lo que pasó, no lo que hoy pasaría.';
 
@@ -987,27 +988,15 @@ CREATE POLICY p_ciudad_escritura ON catalogo.ciudad TO ms_envios USING (true) WI
 
 CREATE POLICY p_ciudad_lectura ON catalogo.ciudad FOR SELECT TO ms_envios, ms_eventos USING (true);
 
-CREATE POLICY p_estado_escritura ON catalogo.estado_envio TO ms_envios USING (true) WITH CHECK (true);
-
 CREATE POLICY p_estado_lectura ON catalogo.estado_envio FOR SELECT TO ms_envios, ms_eventos USING (true);
-
-CREATE POLICY p_operador_escritura ON catalogo.operador TO ms_envios USING (true) WITH CHECK (true);
 
 CREATE POLICY p_operador_lectura ON catalogo.operador FOR SELECT TO ms_envios, ms_eventos USING (true);
 
-CREATE POLICY p_servicio_escritura ON catalogo.tipo_servicio TO ms_envios USING (true) WITH CHECK (true);
-
 CREATE POLICY p_servicio_lectura ON catalogo.tipo_servicio FOR SELECT TO ms_envios, ms_eventos USING (true);
-
-CREATE POLICY p_sla_escritura ON catalogo.sla_servicio TO ms_envios USING (true) WITH CHECK (true);
 
 CREATE POLICY p_sla_lectura ON catalogo.sla_servicio FOR SELECT TO ms_envios, ms_eventos USING (true);
 
-CREATE POLICY p_tipo_escritura ON catalogo.tipo_evento TO ms_envios USING (true) WITH CHECK (true);
-
 CREATE POLICY p_tipo_lectura ON catalogo.tipo_evento FOR SELECT TO ms_envios, ms_eventos USING (true);
-
-CREATE POLICY p_transicion_escritura ON catalogo.transicion_valida TO ms_envios USING (true) WITH CHECK (true);
 
 CREATE POLICY p_transicion_lectura ON catalogo.transicion_valida FOR SELECT TO ms_envios, ms_eventos USING (true);
 
@@ -1049,9 +1038,24 @@ GRANT USAGE ON SCHEMA catalogo TO ms_envios, ms_eventos;
 GRANT USAGE ON SCHEMA envios   TO ms_envios;
 GRANT USAGE ON SCHEMA eventos  TO ms_eventos, rol_lectura;
 
--- ms_envios: dueño del ciclo de vida del envío y del catálogo. Sin DELETE en
--- ninguna tabla: un envío se anula y un catálogo se desactiva (columna activo).
-GRANT SELECT, INSERT, UPDATE ON ALL TABLES IN SCHEMA catalogo TO ms_envios;
+-- rol_admin: administración de datos (catálogos que definen reglas: estados,
+-- tipos de evento, transiciones, servicios y SLA; correcciones). Todos los
+-- privilegios sobre las tablas, pero el historial sigue inmutable: el trigger
+-- trg_evento_inmutable bloquea UPDATE/DELETE también para este rol. Los
+-- cambios de esquema (DDL) los hace el dueño de los objetos, no este rol.
+GRANT USAGE ON SCHEMA catalogo, envios, eventos TO rol_admin;
+GRANT ALL ON ALL TABLES    IN SCHEMA catalogo, envios, eventos TO rol_admin;
+GRANT ALL ON ALL SEQUENCES IN SCHEMA catalogo, envios, eventos TO rol_admin;
+GRANT EXECUTE ON FUNCTION eventos.refrescar_reportes() TO rol_admin;
+
+-- ms_envios: dueño del ciclo de vida del envío. Catálogos: solo lectura, salvo
+-- la red física (punto_red, ciudad). Las reglas del negocio (estados, tipos de
+-- evento, transiciones, servicios, SLA) no las puede reescribir un microservicio
+-- comprometido; el operador se da de alta por registrar_operador (SECURITY
+-- DEFINER). Sin DELETE en ninguna tabla: un envío se anula y un catálogo se
+-- desactiva (columna activo).
+GRANT SELECT ON ALL TABLES IN SCHEMA catalogo TO ms_envios;
+GRANT INSERT, UPDATE ON catalogo.punto_red, catalogo.ciudad TO ms_envios;
 GRANT SELECT, INSERT, UPDATE ON envios.envio, envios.parte, envios.paquete TO ms_envios;
 GRANT SELECT ON envios.v_envio_publico TO ms_envios;
 GRANT USAGE ON SEQUENCE envios.tracking_seq TO ms_envios;  -- DEFAULT gen_tracking_number()
@@ -1078,7 +1082,20 @@ GRANT EXECUTE ON FUNCTION envios.gen_tracking_number() TO ms_envios;
 GRANT EXECUTE ON FUNCTION envios.rastrear(text, text)   TO ms_envios;
 GRANT EXECUTE ON FUNCTION catalogo.registrar_operador(text, text) TO ms_envios, ms_eventos;
 
+-- RLS: el dueño la omite; rol_admin necesita su propia política en cada tabla.
+DO $$
+DECLARE t record;
+BEGIN
+    FOR t IN SELECT schemaname, tablename FROM pg_tables
+              WHERE schemaname IN ('catalogo', 'envios', 'eventos')
+    LOOP
+        EXECUTE format('CREATE POLICY p_admin ON %I.%I TO rol_admin USING (true) WITH CHECK (true)',
+                       t.schemaname, t.tablename);
+    END LOOP;
+END $$;
+
 -- Objetos futuros heredan el mismo criterio.
+ALTER DEFAULT PRIVILEGES IN SCHEMA catalogo, envios, eventos GRANT ALL ON TABLES TO rol_admin;
 ALTER DEFAULT PRIVILEGES IN SCHEMA catalogo GRANT SELECT ON TABLES TO ms_envios, ms_eventos;
 ALTER DEFAULT PRIVILEGES IN SCHEMA eventos  GRANT SELECT ON TABLES TO ms_eventos;
 

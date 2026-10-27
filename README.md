@@ -558,39 +558,37 @@ Con `schema.sql` ejecutado en una base vacía se comprobó con cada rol (`SET RO
 
 ---
 
-> **Pendiente (Sprint 2):** consultas y estimación de volumen.
+## 5. Consultas
 
-## Consultas
- 
 Hay 15 consultas sobre `schema.sql`: 5 de las historias del Sprint 1 (HU-01 a HU-03), 8 del Sprint 2 (HU-04 a HU-07) y 2 de verificación de integridad. Usan filtros, agregaciones y joins, y cada una indica la pregunta de negocio que responde. El SQL está en [consultas.sql](consultas.sql) y la descripción de cada consulta en [docs/consultas.md](docs/consultas.md).
- 
+
 ---
 
-## Estimación de volumen
- 
+## 6. Estimación de volumen
+
 No hay datos históricos de la operación, así que partimos de supuestos: 1.000 envíos por día (30.000 al mes y 360.000 al año), sin picos de temporada ni crecimiento del negocio. El resto sale de las reglas del esquema: cada envío tiene exactamente 2 partes (lo exige un trigger), en promedio 1,2 paquetes y 6 eventos (los 5 del recorrido normal más uno por tránsito extra o intento fallido).
- 
+
 | Tabla | Cálculo | Crecimiento por mes | A 1 año | A 3 años |
 |---|---|---|---|---|
 | `envios.envio` | 1.000 × 30 | 30.000 | 360.000 | 1.080.000 |
 | `envios.parte` | 30.000 × 2 | 60.000 | 720.000 | 2.160.000 |
 | `envios.paquete` | 30.000 × 1,2 | 36.000 | 432.000 | 1.296.000 |
 | `eventos.evento` | 30.000 × 6 | 180.000 | 2.160.000 | 6.480.000 |
- 
+
 Las dos vistas materializadas guardan una fila por día y punto, así que son pequeñas: unas 3.600 y 7.200 filas al año (con 10 y 20 puntos activos por día). Los catálogos crecen por decisiones de la operación y no por volumen: pasan de 4 ciudades y 7 puntos de la red a unas 12 y 25 en un año, y los que definen la máquina de estados (9 estados, 11 tipos de evento y 20 transiciones) no cambian.
- 
+
 Si se duplicaran los envíos diarios, las cuatro tablas de arriba se duplican. `eventos.evento` es la más grande y es la que analizamos en el documento de almacenamiento.
- 
+
 ---
 
-## Análisis de almacenamiento, costo y optimización
- 
+## 7. Análisis de almacenamiento, costo y optimización
+
 Calculamos el almacenamiento y los índices de `eventos.evento`, el costo en páginas de E/S de una consulta con reunión y su optimización algebraica. El detalle paso a paso está en [docs/analisis-almacenamiento.md](docs/analisis-almacenamiento.md).
- 
+
 ---
 
 ## Estructura del repo
- 
+
 ```
 .
 ├── README.md

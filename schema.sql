@@ -43,6 +43,10 @@ CREATE SCHEMA eventos;
 
 COMMENT ON SCHEMA eventos IS 'Historial logístico inmutable y vistas de reporte. Dueño: MS-Eventos.';
 
+CREATE SCHEMA acceso;
+
+COMMENT ON SCHEMA acceso IS 'Usuarios, roles de aplicación y sesiones del inicio de sesión propio (HU-08). Dueño: módulo de autenticación.';
+
 CREATE FUNCTION catalogo.estado_inicial() RETURNS text
     LANGUAGE sql STABLE
     AS $$
@@ -516,6 +520,62 @@ COMMENT ON TABLE catalogo.transicion_valida IS 'Máquina de estados de la operac
 
 COMMENT ON COLUMN catalogo.transicion_valida.estado_destino IS 'A dónde queda el envío. Depende del origen, no solo del evento: el mismo INTENTO_FALLIDO reintenta o abre devolución según de dónde venga.';
 
+CREATE TABLE catalogo.ruta_tramo (
+    ciudad_origen_codigo text NOT NULL,
+    ciudad_destino_codigo text NOT NULL,
+    horas integer NOT NULL,
+    activo boolean DEFAULT true NOT NULL,
+    CONSTRAINT ck_ruta_tramo_distinto CHECK ((ciudad_origen_codigo <> ciudad_destino_codigo)),
+    CONSTRAINT ruta_tramo_horas_check CHECK ((horas > 0))
+);
+
+COMMENT ON TABLE catalogo.ruta_tramo IS 'Red de rutas (Sprint 3): tramo directo por carretera entre dos ciudades, en un sentido. Sin ella un hub intermedio era "cualquier ciudad", y un envío Medellín → Bogotá podía pasar por Barranquilla. Base de la validación del recorrido (HU-02) y del tiempo esperado por tramo (HU-05).';
+
+COMMENT ON COLUMN catalogo.ruta_tramo.horas IS 'Duración aproximada del tramo. Es la referencia contra la que se compara el tiempo real de eventos.v_tramo.';
+
+COMMENT ON COLUMN catalogo.ruta_tramo.activo IS 'Cerrar un tramo (vía cerrada, ruta suspendida) sin borrarlo: el historial que pasó por él sigue siendo válido.';
+
+CREATE TABLE acceso.usuario (
+    username text NOT NULL,
+    password_hash text NOT NULL,
+    activo boolean DEFAULT true NOT NULL,
+    creado_en timestamp with time zone DEFAULT now() NOT NULL,
+    CONSTRAINT ck_usuario_hash_bcrypt CHECK ((password_hash ~ '^\$2[aby]\$[0-9]{2}\$[./A-Za-z0-9]{53}$'::text))
+);
+
+COMMENT ON TABLE acceso.usuario IS 'HU-08. Quién puede iniciar sesión. A un usuario se le desactiva, no se le borra: lo que registró sigue apuntando a él.';
+
+COMMENT ON COLUMN acceso.usuario.username IS 'PK y FK a catalogo.operador(codigo): el nombre de usuario es el `sub` del token, el mismo código que queda en registrado_por de envíos y eventos.';
+
+COMMENT ON COLUMN acceso.usuario.password_hash IS 'Hash BCrypt (la sal va dentro del hash). El CHECK rechaza cualquier cosa que no tenga forma de hash, así una contraseña en texto plano no puede quedar guardada por error.';
+
+CREATE TABLE acceso.usuario_rol (
+    username text NOT NULL,
+    rol text NOT NULL,
+    CONSTRAINT usuario_rol_rol_check CHECK ((rol = ANY (ARRAY['OPERADOR'::text, 'ADMIN'::text])))
+);
+
+COMMENT ON TABLE acceso.usuario_rol IS 'Roles de aplicación de cada usuario (viajan en el claim `roles` del token). Tabla aparte y no una lista "OPERADOR ADMIN" en una columna: un atributo multivaluado rompería 1FN.';
+
+CREATE TABLE acceso.sesion (
+    jti text NOT NULL,
+    username text NOT NULL,
+    creada_en timestamp with time zone DEFAULT now() NOT NULL,
+    ultima_actividad_en timestamp with time zone DEFAULT now() NOT NULL,
+    expira_en timestamp with time zone NOT NULL,
+    cerrada_en timestamp with time zone,
+    CONSTRAINT ck_sesion_actividad CHECK ((ultima_actividad_en >= creada_en)),
+    CONSTRAINT ck_sesion_cierre CHECK (((cerrada_en IS NULL) OR (cerrada_en >= creada_en))),
+    CONSTRAINT ck_sesion_vigencia CHECK ((expira_en > creada_en)),
+    CONSTRAINT sesion_jti_check CHECK ((length(btrim(jti)) > 0))
+);
+
+COMMENT ON TABLE acceso.sesion IS 'HU-08. Un JWT no se puede borrar: sigue sirviendo hasta que vence. Cada token emitido tiene su sesión y el servidor la consulta en cada petición, así cerrar sesión es real y las inactivas se cierran solas.';
+
+COMMENT ON COLUMN acceso.sesion.jti IS 'Claim `jti` del token: identifica la sesión sin guardar el token.';
+
+COMMENT ON COLUMN acceso.sesion.cerrada_en IS 'Nulo mientras la sesión esté abierta. Se llena al cerrar sesión o al vencer por inactividad.';
+
 CREATE TABLE envios.paquete (
     id uuid DEFAULT gen_random_uuid() NOT NULL,
     envio_id uuid NOT NULL,
@@ -828,6 +888,18 @@ ALTER TABLE ONLY catalogo.tipo_servicio
 ALTER TABLE ONLY catalogo.transicion_valida
     ADD CONSTRAINT transicion_valida_pkey PRIMARY KEY (estado_origen, tipo_evento);
 
+ALTER TABLE ONLY catalogo.ruta_tramo
+    ADD CONSTRAINT ruta_tramo_pkey PRIMARY KEY (ciudad_origen_codigo, ciudad_destino_codigo);
+
+ALTER TABLE ONLY acceso.usuario
+    ADD CONSTRAINT usuario_pkey PRIMARY KEY (username);
+
+ALTER TABLE ONLY acceso.usuario_rol
+    ADD CONSTRAINT usuario_rol_pkey PRIMARY KEY (username, rol);
+
+ALTER TABLE ONLY acceso.sesion
+    ADD CONSTRAINT sesion_pkey PRIMARY KEY (jti);
+
 ALTER TABLE ONLY envios.envio
     ADD CONSTRAINT envio_pkey PRIMARY KEY (id);
 
@@ -903,6 +975,12 @@ CREATE UNIQUE INDEX uq_mv_volumen_movimiento ON eventos.mv_volumen_movimiento US
 
 CREATE UNIQUE INDEX uq_mv_volumen_registro ON eventos.mv_volumen_registro USING btree (dia, punto_codigo);
 
+CREATE INDEX idx_ruta_tramo_destino ON catalogo.ruta_tramo USING btree (ciudad_destino_codigo);
+
+CREATE INDEX idx_sesion_usuario ON acceso.sesion USING btree (username);
+
+CREATE INDEX idx_sesion_abierta ON acceso.sesion USING btree (expira_en) WHERE (cerrada_en IS NULL);
+
 CREATE TRIGGER trg_transicion_coherente BEFORE INSERT OR UPDATE ON catalogo.transicion_valida FOR EACH ROW EXECUTE FUNCTION catalogo.verificar_transicion();
 
 CREATE TRIGGER trg_envio_actualizado BEFORE UPDATE ON envios.envio FOR EACH ROW EXECUTE FUNCTION envios.sellar_actualizacion();
@@ -931,6 +1009,21 @@ ALTER TABLE ONLY catalogo.transicion_valida
 
 ALTER TABLE ONLY catalogo.transicion_valida
     ADD CONSTRAINT transicion_valida_tipo_evento_fkey FOREIGN KEY (tipo_evento) REFERENCES catalogo.tipo_evento(codigo);
+
+ALTER TABLE ONLY catalogo.ruta_tramo
+    ADD CONSTRAINT ruta_tramo_ciudad_origen_codigo_fkey FOREIGN KEY (ciudad_origen_codigo) REFERENCES catalogo.ciudad(codigo);
+
+ALTER TABLE ONLY catalogo.ruta_tramo
+    ADD CONSTRAINT ruta_tramo_ciudad_destino_codigo_fkey FOREIGN KEY (ciudad_destino_codigo) REFERENCES catalogo.ciudad(codigo);
+
+ALTER TABLE ONLY acceso.usuario
+    ADD CONSTRAINT usuario_username_fkey FOREIGN KEY (username) REFERENCES catalogo.operador(codigo);
+
+ALTER TABLE ONLY acceso.usuario_rol
+    ADD CONSTRAINT usuario_rol_username_fkey FOREIGN KEY (username) REFERENCES acceso.usuario(username) ON DELETE RESTRICT;
+
+ALTER TABLE ONLY acceso.sesion
+    ADD CONSTRAINT sesion_username_fkey FOREIGN KEY (username) REFERENCES acceso.usuario(username) ON DELETE RESTRICT;
 
 ALTER TABLE ONLY envios.envio
     ADD CONSTRAINT envio_estado_actual_fkey FOREIGN KEY (estado_actual) REFERENCES catalogo.estado_envio(codigo);
@@ -1167,6 +1260,15 @@ INSERT INTO catalogo.transicion_valida (estado_origen, tipo_evento, estado_desti
 	('EN_DEVOLUCION', 'LLEGADA_CENTRO', 'EN_DEVOLUCION'),
 	('EN_DEVOLUCION', 'ENTREGA', 'DEVUELTO'),
 	('EN_DEVOLUCION', 'EXTRAVIO', 'EXTRAVIADO');
+-- Red de rutas entre las cuatro ciudades sembradas. Cada tramo en los dos sentidos.
+INSERT INTO catalogo.ruta_tramo (ciudad_origen_codigo, ciudad_destino_codigo, horas)
+SELECT o, d, h FROM (VALUES
+	('05001', '11001', 9),   -- Medellín ↔ Bogotá
+	('05001', '76001', 9),   -- Medellín ↔ Cali
+	('11001', '76001', 10),  -- Bogotá ↔ Cali
+	('05001', '08001', 13),  -- Medellín ↔ Barranquilla
+	('11001', '08001', 18)   -- Bogotá ↔ Barranquilla
+) AS t(a, b, h), LATERAL (VALUES (a, b), (b, a)) AS s(o, d);
 
 -- Las vistas materializadas se crean WITH NO DATA; sin esto v_volumen_* falla
 -- al consultarse en una base recién creada.

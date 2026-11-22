@@ -1,11 +1,12 @@
-# tracking-logistico-database — Sprint 2
+# tracking-logistico-database — Sprint 3
 
 Base de datos del sistema de tracking logístico — Fábrica Escuela, Bases de Datos.
-Monolito modular sobre un solo PostgreSQL (Supabase): tres schemas —
-`catalogo` (datos de referencia), `envios` (ciclo de vida del envío) y
-`eventos` (historial logístico) — y cuatro roles de base de datos con privilegios
-mínimos. Cubre HU-01 a HU-07 (registrar envío, registrar evento, rastreo público,
-historial, tiempos de tránsito, envíos retrasados y volumen por punto).
+Monolito modular sobre un solo PostgreSQL (Supabase): cuatro schemas —
+`catalogo` (datos de referencia y red de rutas), `envios` (ciclo de vida del envío),
+`eventos` (historial logístico) y `acceso` (usuarios y sesiones) — y roles de base de
+datos con privilegios mínimos. Cubre HU-01 a HU-08 (registrar envío, registrar evento,
+rastreo público, historial, tiempos de tránsito, envíos retrasados, volumen por punto e
+inicio de sesión).
 
 ### Integrantes
 
@@ -18,29 +19,26 @@ historial, tiempos de tránsito, envíos retrasados y volumen por punto).
 
 ---
 
-## 1. Cambios frente al Sprint 1
+## 1. Cambios respecto al Sprint 2
 
-El Sprint 1 tenía 2 tablas (`envios.envio`, `eventos.evento`) y un solo usuario
-`app_user` con `GRANT ALL`. El Sprint 2 pasa a 12 tablas. Cada cambio responde a
-una historia de usuario o a una debilidad que el Sprint 1 dejó anotada.
+El Sprint 3 parte del esquema entregado en el Sprint 2 (12 tablas, 3 schemas, 4 roles). Cada
+cambio se identifica con un código (`M` modelo, `S` script, `R` roles) que se repite en la
+sección donde se detalla. El historial del Sprint 1 al Sprint 2 quedó en el
+[anexo](#anexo-cambios-del-sprint-1-al-sprint-2).
 
-| # | Cambio | Sprint 1 | Sprint 2 | Motivo |
+### MER
+
+| # | Cambio | Sprint 2 | Sprint 3 | Motivo |
 |---|---|---|---|---|
-| 1 | **Entidad nueva `PARTE`** | Columnas `remitente_*` y `destinatario_*` planas en `envio` (8 columnas) | Tabla `envios.parte` 1:N con `envio`, con `rol` ∈ {REMITENTE, DESTINATARIO}, `tipo_documento`, `documento` y `ciudad_codigo` | El Sprint 1 lo dejó escrito: "si esa necesidad aparece en otro sprint, ahí se normaliza". HU-03 verifica al destinatario por teléfono o documento y HU-07 agrupa por ciudad. |
-| 2 | **Entidad nueva `PAQUETE`** | No existía | `envios.paquete` 1:N con `envio` (peso, dimensiones, contenido, valor declarado) | Un envío puede tener varios bultos. |
-| 3 | **Catálogo `CIUDAD`** | Ciudad no existía | `catalogo.ciudad` (código DIVIPOLA) referenciada por `punto_red` y `parte` | Evitar "Bogotá" / "Bogota" duplicadas al agrupar por ciudad (HU-07). |
-| 4 | **Catálogo `PUNTO_RED`** | `evento.punto` era `varchar(150)` libre | `catalogo.punto_red` (centros, puntos de venta, vehículos) y `evento.punto_red_id` FK | Texto libre impedía agrupar por punto y calcular tramos (HU-05, HU-07). |
-| 5 | **Catálogos `ESTADO_ENVIO`, `TIPO_EVENTO` y `TRANSICION_VALIDA`** | `CHECK (estado IN (3 valores))` y `CHECK (tipo_evento IN (4 valores))` | Tres tablas: 9 estados, 11 tipos de evento y la máquina de estados como terna (estado origen, tipo de evento, estado destino) | Aparecen excepciones (retención, devolución, extravío, anulación); cambiar las reglas no debe requerir `ALTER TABLE`. |
-| 6 | **Catálogos `TIPO_SERVICIO` y `SLA_SERVICIO`** | No existían | `envio.tipo_servicio` FK; `sla_servicio` con vigencia (PK compuesta) | HU-05 y HU-06 comparan el tiempo en red contra el SLA del servicio. |
-| 7 | **Catálogo `OPERADOR`** | No existía | `catalogo.operador`; `envio.registrado_por` y `evento.registrado_por` son FK | Trazabilidad de quién registró cada cosa. |
-| 8 | **`ENVIO` cambia de llaves y atributos** | PK `bigserial`; `numero_seguimiento`; `estado`; `fecha_registro` | PK `uuid`; `tracking_number` con formato y dígito verificador; `estado_actual` FK; `horas_sla`, `punto_origen_id`, `punto_destino_id`, `registrado_por`, `admitido_en`, `ultimo_evento_en`, `ultimo_punto_id`, `cerrado_en`, `entregado_en`, `actualizado_en` | HU-03 responde estado + último punto + fecha en una sola lectura; el SLA se congela al alta. |
-| 9 | **`EVENTO` cambia de llaves y atributos** | `id bigserial`, `envio_id`, `tipo_evento`, `punto`, `fecha_hora`, `receptor` | PK `uuid` + `secuencia` (identity); `estado_resultante`, `cierra_envio`, `ocurrido_en` ≠ `registrado_en`, `registrado_por`, `recibido_por` (antes `receptor`), `observaciones`, `clave_idempotencia`, `tracking_number` | Un lector sin señal reporta horas tarde: el hecho (`ocurrido_en`) se separa de la captura (`registrado_en`). Un reintento no duplica el evento (idempotencia). |
-| 10 | **Seguridad** | Un usuario `app_user` con `GRANT ALL`, RLS desactivado | Cuatro roles (`rol_admin`, `ms_envios`, `ms_eventos`, `rol_lectura`) con `GRANT` por tabla/vista, RLS activado en las 12 tablas y `REVOKE` al público | Criterio de mínimo privilegio. |
-| 11 | **Reglas en la base** | Un `CHECK` (receptor obligatorio en ENTREGADO) | Triggers: transición válida, evento inmutable, SLA congelado, envío completo (2 partes + ≥1 paquete) | La integridad no depende de que cada microservicio la recuerde. |
+| M1 | **Entidad nueva `RUTA_TRAMO`** | No existía: un hub intermedio podía ser cualquier punto de la red | `catalogo.ruta_tramo` (ciudad origen, ciudad destino, horas, activo), PK compuesta, dos FK a `CIUDAD` | La red de la operación ya no es "cualquier ciudad con cualquier ciudad": un envío Medellín → Bogotá no puede pasar por Barranquilla. Da el tiempo esperado por tramo contra el que se compara `v_tramo` (HU-05). |
+| M2 | **Entidad nueva `USUARIO`** | El operador solo existía como `catalogo.operador` (código del token), sin credenciales en la base | `acceso.usuario` 1:1 con `OPERADOR` (`username` es PK y FK), `password_hash` BCrypt, `activo` | HU-08: inicio de sesión propio. Las credenciales vivían en variables de entorno y se comparaban en texto plano. |
+| M3 | **Entidad nueva `USUARIO_ROL`** | No existía | `acceso.usuario_rol` (username, rol ∈ {OPERADOR, ADMIN}), PK compuesta | Un usuario puede tener varios roles de aplicación. Guardarlos como lista en una columna rompería 1FN. |
+| M4 | **Entidad nueva `SESION`** | No existía | `acceso.sesion` (jti, usuario, creada, última actividad, expira, cerrada), N:1 con `USUARIO` | HU-08: un JWT sigue siendo válido hasta que vence. Con la sesión en la base, cerrar sesión es real y las sesiones inactivas se cierran. |
+| M5 | **Schema nuevo `acceso`** | 3 schemas | 4 schemas: `catalogo`, `envios`, `eventos`, `acceso` | Las credenciales quedan aisladas: ningún microservicio de negocio tiene `USAGE` sobre `acceso` (ver R1). |
 
-Las referencias de Sprint 1 que se conservan: `envio` 1:N `evento`, FK directa entre
-schemas (monolito), `tracking_number` único, y la regla de que una entrega exige
-constancia de quién recibió (ahora declarada como `tipo_evento.requiere_receptor`).
+Lo que **no** cambia y por qué: las 12 entidades del Sprint 2 conservan sus llaves y
+relaciones. Los ajustes sobre ellas son restricciones e índices (no cambian el MER) y se
+listan en la tabla del script.
 
 ## 2. Modelo entidad-relación refinado
 
@@ -65,6 +63,11 @@ erDiagram
     ENVIO         ||--|{ PARTE : "tiene (remitente y destinatario)"
     ENVIO         ||--|{ PAQUETE : "contiene"
     ENVIO         ||--o{ EVENTO : "tiene"
+    CIUDAD        ||--o{ RUTA_TRAMO : "sale de"
+    CIUDAD        ||--o{ RUTA_TRAMO : "llega a"
+    OPERADOR      ||--o| USUARIO : "inicia sesión como"
+    USUARIO       ||--o{ USUARIO_ROL : "tiene"
+    USUARIO       ||--o{ SESION : "abre"
 
     CIUDAD {
         text codigo PK
@@ -181,13 +184,46 @@ erDiagram
         text observaciones
         text clave_idempotencia UK
     }
+    RUTA_TRAMO {
+        text ciudad_origen_codigo PK, FK
+        text ciudad_destino_codigo PK, FK
+        integer horas
+        boolean activo
+    }
+    USUARIO {
+        text username PK, FK
+        text password_hash
+        boolean activo
+        timestamptz creado_en
+    }
+    USUARIO_ROL {
+        text username PK, FK
+        text rol PK
+    }
+    SESION {
+        text jti PK
+        text username FK
+        timestamptz creada_en
+        timestamptz ultima_actividad_en
+        timestamptz expira_en
+        timestamptz cerrada_en
+    }
 ```
+
+Entidades nuevas en el Sprint 3 (ver [cambios M1–M5](#1-cambios-respecto-al-sprint-2)):
+`RUTA_TRAMO`, `USUARIO`, `USUARIO_ROL` y `SESION`.
 
 **Cardinalidades.** Un envío tiene exactamente dos partes (remitente y destinatario,
 `UNIQUE (envio_id, rol)` + trigger), uno o más paquetes (`UNIQUE (envio_id, consecutivo)`)
 y cero o más eventos. `punto_destino_id` y `ultimo_punto_id` son opcionales
 (`|o`): un envío recién registrado no ha pasado por ningún punto. `TRANSICION_VALIDA`
 resuelve la relación ternaria estado × evento → estado.
+
+`RUTA_TRAMO` es una relación N:M de `CIUDAD` consigo misma con atributos propios
+(`horas`, `activo`); el tramo es dirigido, así que A → B y B → A son dos filas. Un
+`OPERADOR` tiene a lo sumo un `USUARIO` (`|o`): los operadores que llegan con un token
+de otro proveedor de identidad no tienen credenciales aquí. Un `USUARIO` tiene cero o más
+roles y cero o más sesiones; un usuario sin rol existe pero no puede operar (el token sale sin `roles`).
 
 ---
 
@@ -598,3 +634,29 @@ Calculamos el almacenamiento y los índices de `eventos.evento`, el costo en pá
     ├── consultas.md
     └── analisis-almacenamiento.md
 ```
+
+---
+
+## Anexo. Cambios del Sprint 1 al Sprint 2
+
+El Sprint 1 tenía 2 tablas (`envios.envio`, `eventos.evento`) y un solo usuario
+`app_user` con `GRANT ALL`. El Sprint 2 pasa a 12 tablas. Cada cambio responde a
+una historia de usuario o a una debilidad que el Sprint 1 dejó anotada.
+
+| # | Cambio | Sprint 1 | Sprint 2 | Motivo |
+|---|---|---|---|---|
+| 1 | **Entidad nueva `PARTE`** | Columnas `remitente_*` y `destinatario_*` planas en `envio` (8 columnas) | Tabla `envios.parte` 1:N con `envio`, con `rol` ∈ {REMITENTE, DESTINATARIO}, `tipo_documento`, `documento` y `ciudad_codigo` | El Sprint 1 lo dejó escrito: "si esa necesidad aparece en otro sprint, ahí se normaliza". HU-03 verifica al destinatario por teléfono o documento y HU-07 agrupa por ciudad. |
+| 2 | **Entidad nueva `PAQUETE`** | No existía | `envios.paquete` 1:N con `envio` (peso, dimensiones, contenido, valor declarado) | Un envío puede tener varios bultos. |
+| 3 | **Catálogo `CIUDAD`** | Ciudad no existía | `catalogo.ciudad` (código DIVIPOLA) referenciada por `punto_red` y `parte` | Evitar "Bogotá" / "Bogota" duplicadas al agrupar por ciudad (HU-07). |
+| 4 | **Catálogo `PUNTO_RED`** | `evento.punto` era `varchar(150)` libre | `catalogo.punto_red` (centros, puntos de venta, vehículos) y `evento.punto_red_id` FK | Texto libre impedía agrupar por punto y calcular tramos (HU-05, HU-07). |
+| 5 | **Catálogos `ESTADO_ENVIO`, `TIPO_EVENTO` y `TRANSICION_VALIDA`** | `CHECK (estado IN (3 valores))` y `CHECK (tipo_evento IN (4 valores))` | Tres tablas: 9 estados, 11 tipos de evento y la máquina de estados como terna (estado origen, tipo de evento, estado destino) | Aparecen excepciones (retención, devolución, extravío, anulación); cambiar las reglas no debe requerir `ALTER TABLE`. |
+| 6 | **Catálogos `TIPO_SERVICIO` y `SLA_SERVICIO`** | No existían | `envio.tipo_servicio` FK; `sla_servicio` con vigencia (PK compuesta) | HU-05 y HU-06 comparan el tiempo en red contra el SLA del servicio. |
+| 7 | **Catálogo `OPERADOR`** | No existía | `catalogo.operador`; `envio.registrado_por` y `evento.registrado_por` son FK | Trazabilidad de quién registró cada cosa. |
+| 8 | **`ENVIO` cambia de llaves y atributos** | PK `bigserial`; `numero_seguimiento`; `estado`; `fecha_registro` | PK `uuid`; `tracking_number` con formato y dígito verificador; `estado_actual` FK; `horas_sla`, `punto_origen_id`, `punto_destino_id`, `registrado_por`, `admitido_en`, `ultimo_evento_en`, `ultimo_punto_id`, `cerrado_en`, `entregado_en`, `actualizado_en` | HU-03 responde estado + último punto + fecha en una sola lectura; el SLA se congela al alta. |
+| 9 | **`EVENTO` cambia de llaves y atributos** | `id bigserial`, `envio_id`, `tipo_evento`, `punto`, `fecha_hora`, `receptor` | PK `uuid` + `secuencia` (identity); `estado_resultante`, `cierra_envio`, `ocurrido_en` ≠ `registrado_en`, `registrado_por`, `recibido_por` (antes `receptor`), `observaciones`, `clave_idempotencia`, `tracking_number` | Un lector sin señal reporta horas tarde: el hecho (`ocurrido_en`) se separa de la captura (`registrado_en`). Un reintento no duplica el evento (idempotencia). |
+| 10 | **Seguridad** | Un usuario `app_user` con `GRANT ALL`, RLS desactivado | Cuatro roles (`rol_admin`, `ms_envios`, `ms_eventos`, `rol_lectura`) con `GRANT` por tabla/vista, RLS activado en las 12 tablas y `REVOKE` al público | Criterio de mínimo privilegio. |
+| 11 | **Reglas en la base** | Un `CHECK` (receptor obligatorio en ENTREGADO) | Triggers: transición válida, evento inmutable, SLA congelado, envío completo (2 partes + ≥1 paquete) | La integridad no depende de que cada microservicio la recuerde. |
+
+Las referencias de Sprint 1 que se conservan: `envio` 1:N `evento`, FK directa entre
+schemas (monolito), `tracking_number` único, y la regla de que una entrega exige
+constancia de quién recibió (ahora declarada como `tipo_evento.requiere_receptor`).

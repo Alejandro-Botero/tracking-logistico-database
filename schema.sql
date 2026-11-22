@@ -15,7 +15,9 @@ SET check_function_bodies = false;
 SET client_min_messages = warning;
 
 -- ---------------------------------------------------------------------
--- 0. Roles (mínimo privilegio; matriz completa en el README)
+-- 0. Roles (mínimo privilegio; matriz completa en el README).
+--    rol_admin, ms_envios, ms_eventos y rol_lectura vienen del Sprint 2;
+--    ms_acceso es nuevo en el Sprint 3 (HU-08).
 -- ---------------------------------------------------------------------
 DO $$
 BEGIN
@@ -23,7 +25,13 @@ BEGIN
     IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'ms_envios')   THEN CREATE ROLE ms_envios   NOLOGIN; END IF;
     IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'ms_eventos')  THEN CREATE ROLE ms_eventos  NOLOGIN; END IF;
     IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'rol_lectura') THEN CREATE ROLE rol_lectura NOLOGIN; END IF;
+    IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'ms_acceso')   THEN CREATE ROLE ms_acceso   NOLOGIN; END IF;
 END $$;
+
+-- Sprint 3: Postgres concede EXECUTE a PUBLIC en toda función nueva. Desde aquí
+-- las funciones que cree este script (y las de sprints futuros) nacen cerradas y
+-- cada rol recibe EXECUTE solo sobre lo que invoca (sección 2).
+ALTER DEFAULT PRIVILEGES REVOKE EXECUTE ON FUNCTIONS FROM PUBLIC;
 
 -- Nadie crea objetos en public salvo el dueño del esquema.
 REVOKE CREATE ON SCHEMA public FROM PUBLIC;
@@ -92,18 +100,31 @@ CREATE FUNCTION catalogo.verificar_rls() RETURNS TABLE(schema_tabla text, proble
     from pg_class c
     join pg_namespace n on n.oid = c.relnamespace
    where c.relkind = 'r'
-     and n.nspname in ('catalogo','envios','eventos')
+     and n.nspname in ('catalogo','envios','eventos','acceso')
      and (not c.relrowsecurity
           or not exists (select 1 from pg_policy p where p.polrelid = c.oid))
    union all
   select format('%s.%s', table_schema, table_name)::text,
          format('privilegio %s concedido a PUBLIC', privilege_type)::text
     from information_schema.role_table_grants
-   where table_schema in ('catalogo','envios','eventos')
-     and grantee = 'PUBLIC';
+   where table_schema in ('catalogo','envios','eventos','acceso')
+     and grantee = 'PUBLIC'
+   union all
+  select p.oid::regprocedure::text, 'EXECUTE concedido a PUBLIC'
+    from pg_proc p
+    join pg_namespace n on n.oid = p.pronamespace
+   where n.nspname in ('catalogo','envios','eventos','acceso')
+     and has_function_privilege('public', p.oid, 'EXECUTE')
+   union all
+  select p.oid::regprocedure::text, 'SECURITY DEFINER sin search_path fijo'
+    from pg_proc p
+    join pg_namespace n on n.oid = p.pronamespace
+   where n.nspname in ('catalogo','envios','eventos','acceso')
+     and p.prosecdef
+     and not exists (select 1 from unnest(coalesce(p.proconfig, '{}')) c where c like 'search_path=%');
 $$;
 
-COMMENT ON FUNCTION catalogo.verificar_rls() IS 'Devuelve cero filas si toda tabla de los tres schemas tiene RLS con política y nada quedó abierto a PUBLIC. Cualquier fila es un agujero de seguridad por corregir.';
+COMMENT ON FUNCTION catalogo.verificar_rls() IS 'Devuelve cero filas si toda tabla de los cuatro schemas tiene RLS con política, nada quedó abierto a PUBLIC (tablas ni funciones) y toda función SECURITY DEFINER fija su search_path. Cualquier fila es un agujero de seguridad por corregir.';
 
 CREATE FUNCTION catalogo.verificar_transicion() RETURNS trigger
     LANGUAGE plpgsql
@@ -184,7 +205,7 @@ CREATE FUNCTION envios.tracking_valido(p_tracking text) RETURNS boolean
        = envios.digito_verificador(substring(p_tracking from 4 for 10));
 $_$;
 
-COMMENT ON FUNCTION envios.tracking_valido(p_tracking text) IS 'Valida formato y dígito verificador. MS-Eventos la usa para descartar números mal dictados antes de ir a la base (HU-02, HU-03).';
+COMMENT ON FUNCTION envios.tracking_valido(p_tracking text) IS 'Valida formato y dígito verificador (CHECK de envios.envio, HU-01 y HU-03). MS-Eventos no la invoca: no tiene USAGE sobre envios (Sprint 3); el número lo resuelve trg_evento_validar.';
 
 SET default_tablespace = '';
 
@@ -1131,25 +1152,51 @@ CREATE POLICY p_evento_escritura ON eventos.evento FOR INSERT TO ms_eventos WITH
 
 CREATE POLICY p_evento_lectura ON eventos.evento FOR SELECT TO ms_eventos USING (true);
 
+-- Sprint 3: RLS en las tablas nuevas.
+ALTER TABLE catalogo.ruta_tramo ENABLE ROW LEVEL SECURITY;
+
+CREATE POLICY p_ruta_lectura ON catalogo.ruta_tramo FOR SELECT TO ms_envios, ms_eventos USING (true);
+
+ALTER TABLE acceso.usuario ENABLE ROW LEVEL SECURITY;
+
+CREATE POLICY p_usuario_lectura ON acceso.usuario FOR SELECT TO ms_acceso USING (true);
+
+ALTER TABLE acceso.usuario_rol ENABLE ROW LEVEL SECURITY;
+
+CREATE POLICY p_usuario_rol_lectura ON acceso.usuario_rol FOR SELECT TO ms_acceso USING (true);
+
+ALTER TABLE acceso.sesion ENABLE ROW LEVEL SECURITY;
+
+CREATE POLICY p_sesion_lectura ON acceso.sesion FOR SELECT TO ms_acceso USING (true);
+
+CREATE POLICY p_sesion_apertura ON acceso.sesion FOR INSERT TO ms_acceso WITH CHECK (cerrada_en IS NULL);
+
+CREATE POLICY p_sesion_actividad ON acceso.sesion FOR UPDATE TO ms_acceso USING (cerrada_en IS NULL) WITH CHECK (true);
+
 
 -- ---------------------------------------------------------------------
 -- 2. Privilegios (GRANT / REVOKE). RLS ya quedó activado arriba; las
 --    políticas p_* limitan además por rol qué filas ve / escribe cada uno.
 -- ---------------------------------------------------------------------
-REVOKE ALL ON SCHEMA catalogo, envios, eventos FROM PUBLIC;
+REVOKE ALL ON SCHEMA catalogo, envios, eventos, acceso FROM PUBLIC;
 GRANT USAGE ON SCHEMA catalogo TO ms_envios, ms_eventos;
 GRANT USAGE ON SCHEMA envios   TO ms_envios;
 GRANT USAGE ON SCHEMA eventos  TO ms_eventos, rol_lectura;
+GRANT USAGE ON SCHEMA acceso   TO ms_acceso;
+
+-- Sprint 3: ninguna función queda abierta a PUBLIC (cubre también las creadas
+-- antes del ALTER DEFAULT PRIVILEGES, si el script corre sobre una base vieja).
+REVOKE ALL ON ALL FUNCTIONS IN SCHEMA catalogo, envios, eventos, acceso FROM PUBLIC;
 
 -- rol_admin: administración de datos (catálogos que definen reglas: estados,
 -- tipos de evento, transiciones, servicios y SLA; correcciones). Todos los
 -- privilegios sobre las tablas, pero el historial sigue inmutable: el trigger
 -- trg_evento_inmutable bloquea UPDATE/DELETE también para este rol. Los
 -- cambios de esquema (DDL) los hace el dueño de los objetos, no este rol.
-GRANT USAGE ON SCHEMA catalogo, envios, eventos TO rol_admin;
-GRANT ALL ON ALL TABLES    IN SCHEMA catalogo, envios, eventos TO rol_admin;
+GRANT USAGE ON SCHEMA catalogo, envios, eventos, acceso TO rol_admin;
+GRANT ALL ON ALL TABLES    IN SCHEMA catalogo, envios, eventos, acceso TO rol_admin;
 GRANT ALL ON ALL SEQUENCES IN SCHEMA catalogo, envios, eventos TO rol_admin;
-GRANT EXECUTE ON FUNCTION eventos.refrescar_reportes() TO rol_admin;
+GRANT EXECUTE ON ALL FUNCTIONS IN SCHEMA catalogo, envios, eventos TO rol_admin;
 
 -- ms_envios: dueño del ciclo de vida del envío. Catálogos: solo lectura, salvo
 -- la red física (punto_red, ciudad). Las reglas del negocio (estados, tipos de
@@ -1157,9 +1204,18 @@ GRANT EXECUTE ON FUNCTION eventos.refrescar_reportes() TO rol_admin;
 -- comprometido; el operador se da de alta por registrar_operador (SECURITY
 -- DEFINER). Sin DELETE en ninguna tabla: un envío se anula y un catálogo se
 -- desactiva (columna activo).
-GRANT SELECT ON ALL TABLES IN SCHEMA catalogo TO ms_envios;
+GRANT SELECT ON ALL TABLES IN SCHEMA catalogo TO ms_envios;   -- incluye ruta_tramo (Sprint 3)
 GRANT INSERT, UPDATE ON catalogo.punto_red, catalogo.ciudad TO ms_envios;
-GRANT SELECT, INSERT, UPDATE ON envios.envio, envios.parte, envios.paquete TO ms_envios;
+GRANT SELECT, INSERT ON envios.envio, envios.parte, envios.paquete TO ms_envios;
+-- Sprint 3: UPDATE solo en las columnas que una corrección legítima toca. Con
+-- UPDATE sobre toda la tabla, ms_envios podía escribir estado_actual o
+-- entregado_en directamente y saltarse la máquina de estados (HU-02): esas
+-- columnas las mantiene solo trg_evento_aplicar_estado.
+GRANT UPDATE (punto_destino_id) ON envios.envio TO ms_envios;
+GRANT UPDATE (nombre, tipo_documento, documento, telefono, email, direccion, ciudad_codigo)
+      ON envios.parte TO ms_envios;
+GRANT UPDATE (peso_kg, alto_cm, ancho_cm, largo_cm, contenido, valor_declarado)
+      ON envios.paquete TO ms_envios;
 GRANT SELECT ON envios.v_envio_publico TO ms_envios;
 GRANT USAGE ON SEQUENCE envios.tracking_seq TO ms_envios;  -- DEFAULT gen_tracking_number()
 
@@ -1178,19 +1234,39 @@ GRANT SELECT ON eventos.v_envio_retrasado, eventos.v_historial_envio,
                 eventos.v_tramo, eventos.v_volumen_movimiento,
                 eventos.v_volumen_registro TO rol_lectura;
 
--- Funciones que los microservicios llaman directamente.
-REVOKE ALL ON FUNCTION eventos.refrescar_reportes() FROM PUBLIC;
-GRANT EXECUTE ON FUNCTION eventos.refrescar_reportes() TO ms_eventos;
-GRANT EXECUTE ON FUNCTION envios.gen_tracking_number() TO ms_envios;
-GRANT EXECUTE ON FUNCTION envios.rastrear(text, text)   TO ms_envios;
-GRANT EXECUTE ON FUNCTION catalogo.registrar_operador(text, text) TO ms_envios, ms_eventos;
+-- ms_acceso (Sprint 3, HU-08): inicio y cierre de sesión. Lee credenciales y
+-- roles; abre sesiones y solo puede tocar la actividad y el cierre de una sesión
+-- abierta. No crea usuarios (lo hace rol_admin) ni ve ningún otro schema.
+GRANT SELECT ON acceso.usuario, acceso.usuario_rol TO ms_acceso;
+GRANT SELECT, INSERT ON acceso.sesion TO ms_acceso;
+GRANT UPDATE (ultima_actividad_en, cerrada_en) ON acceso.sesion TO ms_acceso;
+
+-- EXECUTE: cada rol solo sobre lo que invoca. Las funciones de trigger no
+-- necesitan EXECUTE del rol que dispara el trigger; las que se evalúan como
+-- DEFAULT, CHECK o dentro de un trigger no SECURITY DEFINER sí.
+--   ms_envios: alta de envío (HU-01) = DEFAULT de tracking_number y estado_actual,
+--              CHECK del tracking, SLA del trigger trg_envio_sla; rastreo (HU-03).
+GRANT EXECUTE ON FUNCTION envios.gen_tracking_number(),
+                          envios.mezclar_secuencia(bigint),
+                          envios.digito_verificador(text),
+                          envios.tracking_valido(text),
+                          catalogo.estado_inicial(),
+                          catalogo.sla_horas(text, timestamp with time zone),
+                          envios.rastrear(text, text),
+                          catalogo.registrar_operador(text, text) TO ms_envios;
+--   ms_eventos: alta del operador del token y refresco de los reportes de
+--               volumen (HU-07). Nada de envios: no tiene USAGE sobre ese schema
+--               y el número del envío lo resuelve trg_evento_validar (SECURITY DEFINER).
+GRANT EXECUTE ON FUNCTION catalogo.registrar_operador(text, text),
+                          eventos.refrescar_reportes() TO ms_eventos;
+--   rol_lectura y ms_acceso: ninguna función.
 
 -- RLS: el dueño la omite; rol_admin necesita su propia política en cada tabla.
 DO $$
 DECLARE t record;
 BEGIN
     FOR t IN SELECT schemaname, tablename FROM pg_tables
-              WHERE schemaname IN ('catalogo', 'envios', 'eventos')
+              WHERE schemaname IN ('catalogo', 'envios', 'eventos', 'acceso')
     LOOP
         EXECUTE format('CREATE POLICY p_admin ON %I.%I TO rol_admin USING (true) WITH CHECK (true)',
                        t.schemaname, t.tablename);
@@ -1198,7 +1274,8 @@ BEGIN
 END $$;
 
 -- Objetos futuros heredan el mismo criterio.
-ALTER DEFAULT PRIVILEGES IN SCHEMA catalogo, envios, eventos GRANT ALL ON TABLES TO rol_admin;
+ALTER DEFAULT PRIVILEGES IN SCHEMA catalogo, envios, eventos, acceso GRANT ALL ON TABLES TO rol_admin;
+ALTER DEFAULT PRIVILEGES IN SCHEMA catalogo, envios, eventos GRANT EXECUTE ON FUNCTIONS TO rol_admin;
 ALTER DEFAULT PRIVILEGES IN SCHEMA catalogo GRANT SELECT ON TABLES TO ms_envios, ms_eventos;
 ALTER DEFAULT PRIVILEGES IN SCHEMA eventos  GRANT SELECT ON TABLES TO ms_eventos;
 

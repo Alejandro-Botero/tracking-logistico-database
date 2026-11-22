@@ -56,6 +56,17 @@ Verificado contra un PostgreSQL 16 vacío: el script corre sin errores, un enví
 llega a `ENTREGADO`, y los tres casos inválidos (evento anterior al registro, teléfono "N/A",
 entrega con fecha distinta del cierre) son rechazados.
 
+### Roles y seguridad
+
+| # | Cambio | Sprint 2 | Sprint 3 | Motivo |
+|---|---|---|---|---|
+| R1 | **Rol nuevo `ms_acceso`** | 4 roles; nadie gestionaba credenciales | 5 roles. `ms_acceso` es el único servicio con `USAGE` sobre `acceso`, y no tiene `USAGE` sobre ningún otro schema | HU-08. Ningún microservicio de negocio puede leer un hash de contraseña, y un fallo en el login no expone envíos. |
+| R2 | **`UPDATE` por columna en `envios`** | `ms_envios` tenía `UPDATE` sobre todas las columnas de `envio`, `parte` y `paquete` | `UPDATE (punto_destino_id)` en `envio`; en `parte` y `paquete` solo los datos corregibles (no `envio_id`, `rol` ni `consecutivo`) | Con el `UPDATE` completo, `ms_envios` podía escribir `estado_actual = 'ENTREGADO'` sin evento ni receptor y saltarse la máquina de estados (HU-02). |
+| R3 | **Privilegios sobre las tablas nuevas** | — | `ms_acceso`: `SELECT` en `usuario` y `usuario_rol`, `SELECT, INSERT` + `UPDATE (ultima_actividad_en, cerrada_en)` en `sesion`. `ruta_tramo`: lectura para los dos microservicios, escritura solo `rol_admin` | Mínimo privilegio: el login no crea usuarios ni alarga sesiones, y la red de rutas es una regla del negocio, como las transiciones. |
+| R4 | **`EXECUTE` explícito sobre funciones** | Las 16 funciones tenían `EXECUTE` para `PUBLIC` (el permiso por defecto de Postgres), incluidas `rastrear()` y `registrar_operador()` (`SECURITY DEFINER`). `ms_eventos` tenía un `GRANT` inútil sobre `tracking_valido()` | `ALTER DEFAULT PRIVILEGES REVOKE EXECUTE ON FUNCTIONS FROM PUBLIC` + `REVOKE ALL ON ALL FUNCTIONS`. Cada rol recibe `EXECUTE` solo sobre lo que invoca; `rol_admin` sobre todas | Una función abierta a `PUBLIC` solo estaba protegida por no tener `USAGE` sobre el schema. Los procedimientos que se agreguen en adelante nacen cerrados y necesitan `GRANT EXECUTE` explícito. |
+| R5 | **RLS en las tablas nuevas** | 12 tablas con RLS | 16 tablas con RLS. `p_ruta_lectura`, `p_usuario_lectura`, `p_usuario_rol_lectura` y tres políticas sobre `sesion` que filtran filas (solo se inserta abierta y solo se actualiza abierta). `p_admin` se extiende a `acceso` | Sin política, una tabla con RLS niega todo; con `USING (cerrada_en IS NULL)` una sesión cerrada no se puede reabrir. |
+| R6 | **`verificar_rls()` ampliada** | Revisaba RLS y `GRANT` a `PUBLIC` en tablas de 3 schemas | Revisa 4 schemas y además funciones con `EXECUTE` para `PUBLIC` y funciones `SECURITY DEFINER` sin `search_path` fijo | La comprobación automática cubre los objetos nuevos. Debe devolver cero filas. |
+
 ## 2. Modelo entidad-relación refinado
 
 ```mermaid
@@ -518,151 +529,229 @@ Otras decisiones que conviene dejar explícitas:
 
 ## 4. Roles y seguridad
 
-El Sprint 1 tenía un solo usuario (`app_user`) con `GRANT ALL` y RLS desactivado: quien tuviera
-la contraseña podía borrar el historial. El Sprint 2 separa los roles según lo que hace cada
-actor del sistema y le da a cada uno solo lo que necesita (mínimo privilegio). La seguridad
-tiene cuatro capas: **roles + `GRANT`/`REVOKE`**, **Row Level Security**, **triggers** que
+El Sprint 1 tenía un solo usuario (`app_user`) con `GRANT ALL` y RLS desactivado. El Sprint 2
+separó los roles según lo que hace cada actor y le dio a cada uno solo lo que necesita (mínimo
+privilegio). El Sprint 3 parte de esa matriz y la extiende a los objetos nuevos: el schema
+`acceso` con sus tres tablas, `ruta_tramo` y las funciones. Lo nuevo o modificado lleva el
+código del cambio (**R1**…). La seguridad tiene cuatro capas: **roles + `GRANT`/`REVOKE`**
+(ahora también por columna y sobre funciones), **Row Level Security**, **triggers** que
 protegen las reglas aunque el rol tenga permiso, y **funciones `SECURITY DEFINER`** para los
-pocos casos en que un servicio necesita algo que no se le puede conceder directamente.
+casos en que un servicio necesita algo que no se le puede conceder directamente.
 
 ### Roles
 
 | Rol | Quién lo usa | Para qué |
 |---|---|---|
-| `rol_admin` | Personas del equipo (administración de datos) | Mantener los catálogos que definen las reglas (estados, tipos de evento, transiciones, servicios, SLA) y corregir datos |
+| `rol_admin` | Personas del equipo (administración de datos) | Mantener los catálogos que definen las reglas (estados, tipos de evento, transiciones, servicios, SLA, **red de rutas**), **crear y desactivar usuarios** y corregir datos |
 | `ms_envios` | **La aplicación**: microservicio MS-Envíos | Registrar envíos, partes y paquetes (HU-01), rastreo público (HU-03), alta de puntos y ciudades de la red |
 | `ms_eventos` | **La aplicación**: microservicio MS-Eventos | Registrar eventos (HU-02) y consultar historial, tiempos, retrasos y volumen (HU-04 a HU-07) |
 | `rol_lectura` | Analistas y reportes | Consultar únicamente las vistas de reporte (HU-04 a HU-07) |
+| **`ms_acceso`** (**R1**, nuevo) | **La aplicación**: módulo de autenticación | Iniciar y cerrar sesión (HU-08): leer credenciales y roles, abrir sesiones, registrar actividad y cierre |
 
-Los cuatro son `NOLOGIN`: la contraseña y el `LOGIN` se asignan fuera del repo
+Los cinco son `NOLOGIN`: la contraseña y el `LOGIN` se asignan fuera del repo
 (`ALTER ROLE ms_envios WITH LOGIN PASSWORD '<secreto>'`). Los cambios de esquema (DDL) los hace
 el dueño de los objetos, es decir, quien ejecuta `schema.sql`; ningún rol de la aplicación puede
 crear ni alterar tablas.
 
 ### Matriz rol × tabla
 
-`S` SELECT · `I` INSERT · `U` UPDATE · `D` DELETE · `—` sin acceso. Generada consultando
-`has_table_privilege` sobre una base creada con `schema.sql`.
+`S` SELECT · `I` INSERT · `U` UPDATE · `U(col)` UPDATE solo en algunas columnas · `D` DELETE ·
+`—` sin acceso. Generada consultando `has_table_privilege` / `has_any_column_privilege` sobre
+una base creada con `schema.sql`. En **negrita**, lo que cambió frente al Sprint 2.
 
-| Tabla | `rol_admin` | `ms_envios` | `ms_eventos` | `rol_lectura` |
-|---|---|---|---|---|
-| `catalogo.ciudad` | S I U D | S I U | S | — |
-| `catalogo.punto_red` | S I U D | S I U | S | — |
-| `catalogo.operador` | S I U D | S | S | — |
-| `catalogo.estado_envio` | S I U D | S | S | — |
-| `catalogo.tipo_evento` | S I U D | S | S | — |
-| `catalogo.transicion_valida` | S I U D | S | S | — |
-| `catalogo.tipo_servicio` | S I U D | S | S | — |
-| `catalogo.sla_servicio` | S I U D | S | S | — |
-| `envios.envio` | S I U D | S I U | — | — |
-| `envios.parte` | S I U D | S I U | — | — |
-| `envios.paquete` | S I U D | S I U | — | — |
-| `eventos.evento` | S I U D (*) | — | S I | — |
+| Tabla | `rol_admin` | `ms_envios` | `ms_eventos` | `rol_lectura` | `ms_acceso` |
+|---|---|---|---|---|---|
+| `catalogo.ciudad` | S I U D | S I U | S | — | — |
+| `catalogo.punto_red` | S I U D | S I U | S | — | — |
+| `catalogo.operador` | S I U D | S | S | — | — |
+| `catalogo.estado_envio` | S I U D | S | S | — | — |
+| `catalogo.tipo_evento` | S I U D | S | S | — | — |
+| `catalogo.transicion_valida` | S I U D | S | S | — | — |
+| `catalogo.tipo_servicio` | S I U D | S | S | — | — |
+| `catalogo.sla_servicio` | S I U D | S | S | — | — |
+| **`catalogo.ruta_tramo`** | **S I U D** | **S** | **S** | — | — |
+| `envios.envio` | S I U D | S I **U(col)** | — | — | — |
+| `envios.parte` | S I U D | S I **U(col)** | — | — | — |
+| `envios.paquete` | S I U D | S I **U(col)** | — | — | — |
+| `eventos.evento` | S I U D (*) | — | S I | — | — |
+| **`acceso.usuario`** | **S I U D** | — | — | — | **S** |
+| **`acceso.usuario_rol`** | **S I U D** | — | — | — | **S** |
+| **`acceso.sesion`** | **S I U D** | — | — | — | **S I U(col)** |
 
 (*) `rol_admin` tiene el privilegio, pero el trigger `trg_evento_inmutable` rechaza `UPDATE` y
 `DELETE` sobre `evento` para cualquier rol: el historial es de solo inserción.
 
-**Vistas y funciones.** Las vistas de `eventos` se crean con `security_invoker = false`, es decir,
-leen con los permisos del dueño. Así un rol de reporte consulta el resultado sin tener acceso a
-las tablas base.
+**UPDATE por columna (R2, R3).**
 
-| Objeto | `ms_envios` | `ms_eventos` | `rol_lectura` |
+| Tabla | Rol | Columnas que puede actualizar | Lo que queda fuera |
 |---|---|---|---|
-| `envios.v_envio_publico`, `envios.rastrear()` (HU-03) | SELECT / EXECUTE | — | — |
-| `eventos.v_historial_envio`, `v_tramo`, `v_tiempo_transito_envio`, `v_tiempo_transito_tramo`, `v_envio_retrasado`, `v_volumen_registro`, `v_volumen_movimiento` | — | SELECT | SELECT |
-| `eventos.v_envio_referencia`, `eventos.v_envio_incoherente` | — | SELECT | — |
-| `eventos.refrescar_reportes()` | — | EXECUTE | — |
-| `catalogo.registrar_operador()` | EXECUTE | EXECUTE | — |
-| `envios.gen_tracking_number()` | EXECUTE | — | — |
+| `envios.envio` | `ms_envios` | `punto_destino_id` | `estado_actual`, `ultimo_evento_en`, `ultimo_punto_id`, `admitido_en`, `cerrado_en`, `entregado_en` (los mantiene solo `trg_evento_aplicar_estado`), `tracking_number`, `horas_sla`, `registrado_*` |
+| `envios.parte` | `ms_envios` | `nombre`, `tipo_documento`, `documento`, `telefono`, `email`, `direccion`, `ciudad_codigo` | `envio_id`, `rol` (no se mueve una parte a otro envío ni se cambia remitente por destinatario) |
+| `envios.paquete` | `ms_envios` | `peso_kg`, `alto_cm`, `ancho_cm`, `largo_cm`, `contenido`, `valor_declarado` | `envio_id`, `consecutivo` |
+| `acceso.sesion` | `ms_acceso` | `ultima_actividad_en`, `cerrada_en` | `jti`, `username`, `creada_en`, `expira_en` (una sesión no se alarga ni cambia de dueño) |
+
+**Vistas y funciones (R4).** Las vistas de `eventos` se crean con `security_invoker = false`, es
+decir, leen con los permisos del dueño. Así un rol de reporte consulta el resultado sin tener
+acceso a las tablas base. Desde el Sprint 3 **ninguna función queda con `EXECUTE` para
+`PUBLIC`**, y cada rol recibe `EXECUTE` solo sobre lo que invoca.
+
+| Objeto | `rol_admin` | `ms_envios` | `ms_eventos` | `rol_lectura` | `ms_acceso` |
+|---|---|---|---|---|---|
+| `envios.v_envio_publico` (vista, HU-03) | SELECT | SELECT | — | — | — |
+| `eventos.v_historial_envio`, `v_tramo`, `v_tiempo_transito_envio`, `v_tiempo_transito_tramo`, `v_envio_retrasado`, `v_volumen_registro`, `v_volumen_movimiento` (vistas) | SELECT | — | SELECT | SELECT | — |
+| `eventos.v_envio_referencia`, `eventos.v_envio_incoherente` (vistas) | SELECT | — | SELECT | — | — |
+| `envios.rastrear()` (HU-03) | EXECUTE | EXECUTE | — | — | — |
+| `catalogo.registrar_operador()` | EXECUTE | EXECUTE | EXECUTE | — | — |
+| `eventos.refrescar_reportes()` (HU-07) | EXECUTE | — | EXECUTE | — | — |
+| `envios.gen_tracking_number()`, `mezclar_secuencia()`, `digito_verificador()`, `tracking_valido()`, `catalogo.estado_inicial()`, `catalogo.sla_horas()` | EXECUTE | **EXECUTE** | — | — | — |
+| `catalogo.verificar_rls()` | EXECUTE | — | — | — | — |
+| Funciones de trigger (`validar_evento`, `aplicar_estado_envio`, `bloquear_modificacion`, `fijar_sla`, `sellar_actualizacion`, `verificar_envio_completo`, `verificar_transicion`) | EXECUTE | — | — | — | — |
+
+Por qué `ms_envios` necesita las seis funciones auxiliares: Postgres comprueba `EXECUTE` con el
+rol que hace el `INSERT` cuando la función aparece en un `DEFAULT` (`gen_tracking_number`, que
+llama a `mezclar_secuencia` y `digito_verificador`; `estado_inicial`), en un `CHECK`
+(`tracking_valido`) o dentro de un trigger que no es `SECURITY DEFINER` (`sla_horas`, llamada
+por `trg_envio_sla`). Se comprobó quitando el `GRANT` uno a uno: el alta del envío falla con
+`permission denied for function`. Las funciones de trigger no lo necesitan: el permiso se
+verifica al crear el trigger, no al dispararlo.
 
 ### Decisiones de diseño
 
 - **`ms_envios` no escribe las reglas del negocio.** Solo lee `estado_envio`, `tipo_evento`,
-  `transicion_valida`, `tipo_servicio` y `sla_servicio`. Si pudiera modificarlas, un servicio
-  comprometido reescribiría la máquina de estados o los SLA. Esas tablas las cambia `rol_admin`.
-  Tampoco inserta en `operador`: lo hace `registrar_operador()`, que es `SECURITY DEFINER`.
+  `transicion_valida`, `tipo_servicio`, `sla_servicio` y `ruta_tramo`. Si pudiera
+  modificarlas, un servicio comprometido reescribiría la máquina de estados, los SLA o la red.
+  Esas tablas las cambia `rol_admin`. Tampoco inserta en `operador`: lo hace
+  `registrar_operador()`, que es `SECURITY DEFINER`.
+- **(R2) `ms_envios` ya no puede saltarse la máquina de estados.** En el Sprint 2 tenía `UPDATE`
+  sobre toda la tabla `envio`: un `UPDATE envios.envio SET estado_actual = 'ENTREGADO'` marcaba
+  un envío como entregado sin evento de entrega ni receptor. Ahora solo puede corregir el destino
+  previsto; el estado lo cambia únicamente un evento válido.
 - **Nadie de la aplicación borra.** Ningún rol de servicio tiene `DELETE`: un envío se anula con un
-  evento y un catálogo se desactiva con la columna `activo`. Las FK hacia `envio` son `ON DELETE RESTRICT`.
+  evento, un catálogo se desactiva con la columna `activo`, un usuario con `usuario.activo` y una
+  sesión se cierra con `cerrada_en`. Las FK hacia `envio` y hacia `usuario` son `ON DELETE RESTRICT`.
 - **`ms_eventos` no ve `envios.envio`.** Valida y propaga el estado a través de funciones
   `SECURITY DEFINER` (`validar_evento`, `aplicar_estado_envio`) con `search_path` fijo, y lee
-  el envío solo mediante la vista `v_envio_referencia`. Al separar las bases, esa vista se
-  reemplaza por una llamada HTTP sin tocar el resto.
-- **`rol_lectura` no toca tablas.** Solo vistas de reporte; no ve datos personales de `parte`.
+  el envío solo mediante la vista `v_envio_referencia`. **(R4)** El Sprint 2 le daba
+  `EXECUTE` sobre `tracking_valido()`, pero sin `USAGE` sobre `envios` nunca pudo invocarla; se retiró.
+- **(R1) Las credenciales viven en su propio schema.** Solo `ms_acceso` y `rol_admin` tienen
+  `USAGE` sobre `acceso`. Ni `ms_envios`, ni `ms_eventos`, ni `rol_lectura` pueden leer un hash de
+  contraseña. A su vez `ms_acceso` no tiene `USAGE` sobre ningún otro schema: un fallo en el
+  login no expone envíos ni datos personales.
+- **(R3) `ms_acceso` no crea usuarios ni reabre sesiones.** Lee `usuario` y `usuario_rol`, inserta
+  sesiones y solo actualiza `ultima_actividad_en` y `cerrada_en`. La política
+  `p_sesion_actividad` solo ve sesiones abiertas, así que una sesión cerrada no se puede reabrir
+  (el `UPDATE` afecta cero filas). Crear y desactivar usuarios es tarea de `rol_admin`.
+- **`rol_lectura` no toca tablas.** Solo vistas de reporte; no ve datos personales de `parte`
+  ni nada de `acceso`.
 - **Rastreo público con segundo factor.** `rastrear(tracking, verificación)` exige el número más los
   últimos 4 dígitos del teléfono o documento del destinatario, y devuelve cero filas si no
   coinciden, sin decir cuál de los dos falló.
+- **(R4) Funciones cerradas por defecto.** Postgres concede `EXECUTE` a `PUBLIC` en toda función
+  nueva, y en el Sprint 2 las 16 funciones de los schemas lo tenían, incluidas `rastrear()` y
+  `registrar_operador()`, que son `SECURITY DEFINER`. Solo las frenaba no tener `USAGE` sobre el
+  schema. Ahora `ALTER DEFAULT PRIVILEGES REVOKE EXECUTE ON FUNCTIONS FROM PUBLIC` (al inicio del
+  script) hace que nazcan cerradas, `REVOKE ALL ON ALL FUNCTIONS ... FROM PUBLIC` cierra las que
+  ya existan, y cada procedimiento o función que se agregue en adelante necesita un `GRANT EXECUTE`
+  explícito para el rol que lo invoca.
 
 ### Row Level Security
 
-RLS está activado en las 12 tablas y `REVOKE ALL ... FROM PUBLIC` en los tres schemas. Una tabla con RLS
-y sin política para un rol niega todo a ese rol; los roles `anon` y `authenticated` de Supabase no
-tienen `GRANT` ni política sobre estos schemas, así que no ven nada. Políticas:
+RLS está activado en las 16 tablas y `REVOKE ALL ... FROM PUBLIC` en los cuatro schemas. Una tabla
+con RLS y sin política para un rol niega todo a ese rol; los roles `anon` y `authenticated` de
+Supabase no tienen `GRANT` ni política sobre estos schemas, así que no ven nada. Políticas:
 
 | Tabla(s) | Política | Rol | Comando |
 |---|---|---|---|
 | `punto_red`, `ciudad` | `p_catalogo_escritura`, `p_ciudad_escritura` | `ms_envios` | ALL |
-| 8 tablas de `catalogo` | `p_*_lectura` | `ms_envios`, `ms_eventos` | SELECT |
+| 8 tablas de `catalogo` del Sprint 2 | `p_*_lectura` | `ms_envios`, `ms_eventos` | SELECT |
+| **`ruta_tramo`** (R5) | **`p_ruta_lectura`** | `ms_envios`, `ms_eventos` | SELECT |
 | `envio`, `parte`, `paquete` | `p_envio`, `p_parte`, `p_paquete` | `ms_envios` | ALL |
 | `evento` | `p_evento_lectura` | `ms_eventos` | SELECT |
 | `evento` | `p_evento_escritura` | `ms_eventos` | INSERT |
-| las 12 tablas | `p_admin` | `rol_admin` | ALL |
+| **`usuario`, `usuario_rol`** (R5) | **`p_usuario_lectura`, `p_usuario_rol_lectura`** | `ms_acceso` | SELECT |
+| **`sesion`** (R5) | **`p_sesion_lectura`** | `ms_acceso` | SELECT |
+| **`sesion`** (R5) | **`p_sesion_apertura`**: `WITH CHECK (cerrada_en IS NULL)` | `ms_acceso` | INSERT |
+| **`sesion`** (R5) | **`p_sesion_actividad`**: `USING (cerrada_en IS NULL)` | `ms_acceso` | UPDATE |
+| las 16 tablas | `p_admin` | `rol_admin` | ALL |
 
-Las políticas usan `USING (true)`: la separación es por rol y por tabla, no por fila, porque este
-modelo no tiene inquilinos ni dueños de fila. La función `catalogo.verificar_rls()` devuelve cero filas
-cuando todas las tablas tienen RLS con política y nada quedó abierto a `PUBLIC`; cualquier fila es un agujero.
+Las políticas de catálogo y negocio usan `USING (true)`: la separación es por rol y por tabla, no
+por fila, porque este modelo no tiene inquilinos ni dueños de fila. Las de `sesion` sí filtran
+filas: una sesión nace abierta y solo una sesión abierta se puede actualizar.
+
+**(R6)** `catalogo.verificar_rls()` ahora revisa los cuatro schemas y detecta también funciones
+con `EXECUTE` para `PUBLIC` y funciones `SECURITY DEFINER` sin `search_path` fijo. Devuelve cero
+filas cuando todo está cerrado; cualquier fila es un agujero. Solo `rol_admin` puede ejecutarla.
 
 ### Script
 
 Está en la sección 2 de [`schema.sql`](schema.sql); estos son los fragmentos esenciales.
 
 ```sql
--- 1. Crear los roles
+-- 1. Crear los roles (ms_acceso es nuevo en el Sprint 3)
 CREATE ROLE rol_admin   NOLOGIN;
 CREATE ROLE ms_envios   NOLOGIN;
 CREATE ROLE ms_eventos  NOLOGIN;
 CREATE ROLE rol_lectura NOLOGIN;
+CREATE ROLE ms_acceso   NOLOGIN;
 
--- 2. Quitar acceso al público y permitir uso de cada schema solo a quien lo necesita
+-- 2. Funciones cerradas por defecto (antes de crear cualquiera)
+ALTER DEFAULT PRIVILEGES REVOKE EXECUTE ON FUNCTIONS FROM PUBLIC;
+
+-- 3. Quitar acceso al público y permitir uso de cada schema solo a quien lo necesita
 REVOKE CREATE ON SCHEMA public FROM PUBLIC;
-REVOKE ALL ON SCHEMA catalogo, envios, eventos FROM PUBLIC;
+REVOKE ALL ON SCHEMA catalogo, envios, eventos, acceso FROM PUBLIC;
+REVOKE ALL ON ALL FUNCTIONS IN SCHEMA catalogo, envios, eventos, acceso FROM PUBLIC;
 GRANT USAGE ON SCHEMA catalogo TO ms_envios, ms_eventos;
 GRANT USAGE ON SCHEMA envios   TO ms_envios;
 GRANT USAGE ON SCHEMA eventos  TO ms_eventos, rol_lectura;
-GRANT USAGE ON SCHEMA catalogo, envios, eventos TO rol_admin;
+GRANT USAGE ON SCHEMA acceso   TO ms_acceso;
+GRANT USAGE ON SCHEMA catalogo, envios, eventos, acceso TO rol_admin;
 
--- 3. Privilegios mínimos
-GRANT ALL ON ALL TABLES    IN SCHEMA catalogo, envios, eventos TO rol_admin;
-GRANT ALL ON ALL SEQUENCES IN SCHEMA catalogo, envios, eventos TO rol_admin;
+-- 4. Privilegios mínimos sobre tablas (UPDATE por columna donde aplica)
+GRANT ALL ON ALL TABLES IN SCHEMA catalogo, envios, eventos, acceso TO rol_admin;
 
-GRANT SELECT ON ALL TABLES IN SCHEMA catalogo TO ms_envios;
-GRANT INSERT, UPDATE ON catalogo.punto_red, catalogo.ciudad TO ms_envios;
-GRANT SELECT, INSERT, UPDATE ON envios.envio, envios.parte, envios.paquete TO ms_envios;
-GRANT USAGE ON SEQUENCE envios.tracking_seq TO ms_envios;      -- DEFAULT gen_tracking_number()
+GRANT SELECT ON ALL TABLES IN SCHEMA catalogo TO ms_envios;          -- incluye ruta_tramo
+GRANT SELECT, INSERT ON envios.envio, envios.parte, envios.paquete TO ms_envios;
+GRANT UPDATE (punto_destino_id) ON envios.envio TO ms_envios;
 
 GRANT SELECT ON ALL TABLES IN SCHEMA catalogo TO ms_eventos;
-GRANT SELECT, INSERT ON eventos.evento TO ms_eventos;          -- append-only
+GRANT SELECT, INSERT ON eventos.evento TO ms_eventos;                -- append-only
 
-GRANT SELECT ON eventos.v_historial_envio, eventos.v_tramo, eventos.v_volumen_registro,
-                eventos.v_volumen_movimiento, eventos.v_tiempo_transito_envio,
-                eventos.v_tiempo_transito_tramo, eventos.v_envio_retrasado TO rol_lectura;
+GRANT SELECT ON acceso.usuario, acceso.usuario_rol TO ms_acceso;
+GRANT SELECT, INSERT ON acceso.sesion TO ms_acceso;
+GRANT UPDATE (ultima_actividad_en, cerrada_en) ON acceso.sesion TO ms_acceso;
 
--- 4. RLS (una política por rol y tabla; rol_admin con un bucle sobre las 12 tablas)
-ALTER TABLE eventos.evento ENABLE ROW LEVEL SECURITY;
-CREATE POLICY p_evento_lectura   ON eventos.evento FOR SELECT TO ms_eventos USING (true);
-CREATE POLICY p_evento_escritura ON eventos.evento FOR INSERT TO ms_eventos WITH CHECK (true);
+-- 5. EXECUTE solo para quien invoca cada función
+GRANT EXECUTE ON ALL FUNCTIONS IN SCHEMA catalogo, envios, eventos TO rol_admin;
+GRANT EXECUTE ON FUNCTION envios.rastrear(text, text) TO ms_envios;
+GRANT EXECUTE ON FUNCTION eventos.refrescar_reportes() TO ms_eventos;
+GRANT EXECUTE ON FUNCTION catalogo.registrar_operador(text, text) TO ms_envios, ms_eventos;
+
+-- 6. RLS en las tablas nuevas
+ALTER TABLE acceso.sesion ENABLE ROW LEVEL SECURITY;
+CREATE POLICY p_sesion_lectura   ON acceso.sesion FOR SELECT TO ms_acceso USING (true);
+CREATE POLICY p_sesion_apertura  ON acceso.sesion FOR INSERT TO ms_acceso WITH CHECK (cerrada_en IS NULL);
+CREATE POLICY p_sesion_actividad ON acceso.sesion FOR UPDATE TO ms_acceso USING (cerrada_en IS NULL) WITH CHECK (true);
 ```
 
 ### Verificación
 
-Con `schema.sql` ejecutado en una base vacía se comprobó con cada rol (`SET ROLE`):
+Con `schema.sql` ejecutado en un PostgreSQL 16 vacío se comprobó con cada rol (`SET ROLE`):
 
-- `ms_envios` registra un envío completo, pero `UPDATE transicion_valida`, `INSERT tipo_servicio`,
-  `UPDATE sla_servicio` y `DELETE envio` fallan con `permission denied`.
-- `ms_eventos` inserta un evento y lee el historial, pero no puede leer `envios.envio`, escribir
-  `catalogo.ciudad` ni hacer `UPDATE`/`DELETE` sobre `evento`.
-- `rol_lectura` lee `v_volumen_registro`, pero `SELECT` sobre `evento` y sobre `catalogo` falla.
-- `rol_admin` inserta en catálogos, pero `UPDATE`/`DELETE` sobre `evento` los rechaza el trigger.
-- `SELECT * FROM catalogo.verificar_rls()` devuelve cero filas.
+- `ms_envios` registra un envío completo (con sus partes y paquete) y `ms_eventos` lo lleva hasta
+  `ENTREGADO`, cada uno con solo sus privilegios.
+- `ms_envios` corrige `punto_destino_id`, pero `UPDATE envios.envio SET estado_actual = ...`,
+  `UPDATE catalogo.ruta_tramo`, `SELECT` sobre `acceso.usuario` y `verificar_rls()` fallan con
+  `permission denied`.
+- `ms_acceso` lee los roles de un usuario, abre una sesión, registra actividad y la cierra; pero
+  reabrirla afecta cero filas, y cambiar `username`, actualizar `usuario`, borrar sesiones o leer
+  `envios` y `catalogo` fallan.
+- `rol_admin` crea un usuario con hash BCrypt; con una contraseña en texto plano lo rechaza
+  `ck_usuario_hash_bcrypt`. `UPDATE`/`DELETE` sobre `evento` los sigue rechazando el trigger.
+- `rol_lectura` lee `v_historial_envio`, pero `rastrear()` y `refrescar_reportes()` fallan.
+- Un rol nuevo sin `GRANT` no puede ejecutar ninguna función de los schemas.
+- Ninguna función tiene `EXECUTE` para `PUBLIC` y `SELECT * FROM catalogo.verificar_rls()`
+  devuelve cero filas.
 
 ---
 

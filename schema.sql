@@ -1,5 +1,5 @@
 -- =====================================================================
--- Tracking logístico — Fábrica Escuela, Sprint 2
+-- Tracking logístico — Fábrica Escuela, Sprint 3
 -- Script de estructuras: roles, schemas, tablas, claves, restricciones,
 -- índices, funciones/triggers de integridad, vistas de reporte, RLS y
 -- privilegios. Ejecutable de punta a punta en un PostgreSQL / Supabase
@@ -261,7 +261,8 @@ CREATE TABLE envios.envio (
     cerrado_en timestamp with time zone,
     entregado_en timestamp with time zone,
     actualizado_en timestamp with time zone DEFAULT now() NOT NULL,
-    CONSTRAINT ck_envio_cierre CHECK (((entregado_en IS NULL) OR (cerrado_en IS NOT NULL))),
+    CONSTRAINT ck_envio_cronologia CHECK ((((admitido_en IS NULL) OR (admitido_en >= registrado_en)) AND ((cerrado_en IS NULL) OR (cerrado_en >= registrado_en)))),
+    CONSTRAINT ck_envio_entrega_es_cierre CHECK (((entregado_en IS NULL) OR (entregado_en = cerrado_en))),
     CONSTRAINT ck_envio_tracking_valido CHECK (envios.tracking_valido(tracking_number)),
     CONSTRAINT envio_horas_sla_check CHECK ((horas_sla > 0))
 );
@@ -277,6 +278,10 @@ COMMENT ON COLUMN envios.envio.registrado_por IS 'Operador que dio el alta, toma
 COMMENT ON COLUMN envios.envio.admitido_en IS 'Primer evento del envío: la entrada real a la red. El reloj del SLA arranca aquí y no en `registrado_en`, porque un envío dado de alta a las 5 p.m. en el mostrador no está en tránsito hasta que alguien lo recoge.';
 
 COMMENT ON COLUMN envios.envio.ultimo_evento_en IS 'Caché del último movimiento, mantenido por el trigger trg_evento_aplicar_estado. Permite que HU-03 responda estado + punto + fecha en una sola lectura (NFR-09).';
+
+COMMENT ON CONSTRAINT ck_envio_cronologia ON envios.envio IS 'Sprint 3: ningún movimiento es anterior al registro. Antes, el primer evento solo se comparaba contra el último movimiento (nulo en un envío nuevo), así que podía quedar admitido antes de existir.';
+
+COMMENT ON CONSTRAINT ck_envio_entrega_es_cierre ON envios.envio IS 'Sprint 3: reemplaza a ck_envio_cierre. La entrega exitosa es el cierre; antes solo se exigía que existiera un cierre, sin importar cuándo.';
 
 COMMENT ON COLUMN envios.envio.cerrado_en IS 'Momento en que el envío llegó a un estado final, terminara como terminara. `entregado_en` solo se llena si ese final fue exitoso.';
 
@@ -419,6 +424,11 @@ begin
     raise exception 'No existe un envío con id %', new.envio_id using errcode = '23503';
   end if;
   new.tracking_number := v_envio.tracking_number;
+  if new.ocurrido_en < v_envio.registrado_en then
+    raise exception 'El evento ocurre antes de que el envío % fuera registrado (% < %)',
+      v_envio.tracking_number, new.ocurrido_en, v_envio.registrado_en
+      using errcode = '22007';
+  end if;
   if v_tipo.requiere_receptor and coalesce(btrim(new.recibido_por), '') = '' then
     raise exception 'El evento % exige constancia de quién recibió', new.tipo_evento
       using errcode = '23514';
@@ -612,9 +622,11 @@ CREATE TABLE envios.parte (
     CONSTRAINT parte_email_check CHECK (((email IS NULL) OR (email ~ '^[^@[:space:]]+@[^@[:space:]]+\.[^@[:space:]]+$'::text))),
     CONSTRAINT parte_nombre_check CHECK ((length(btrim(nombre)) > 0)),
     CONSTRAINT parte_rol_check CHECK ((rol = ANY (ARRAY['REMITENTE'::text, 'DESTINATARIO'::text]))),
-    CONSTRAINT parte_telefono_check CHECK ((length(btrim(telefono)) > 0)),
+    CONSTRAINT parte_telefono_check CHECK ((length(regexp_replace(telefono, '\D'::text, ''::text, 'g'::text)) >= 7)),
     CONSTRAINT parte_tipo_documento_check CHECK ((tipo_documento = ANY (ARRAY['CC'::text, 'CE'::text, 'NIT'::text, 'PAS'::text])))
 );
+
+COMMENT ON CONSTRAINT parte_telefono_check ON envios.parte IS 'Sprint 3: al menos 7 dígitos. Antes bastaba con que no estuviera vacío, y un teléfono como "N/A" dejaba al destinatario sin forma de pasar el segundo factor de rastrear() (últimos 4 dígitos, HU-03).';
 
 COMMENT ON TABLE envios.parte IS 'Remitente y destinatario. Los NOT NULL son la lista de datos obligatorios de HU-01: al faltar uno la transacción falla y el envío no queda registrado.';
 
@@ -920,8 +932,6 @@ ALTER TABLE ONLY envios.parte
 
 ALTER TABLE ONLY eventos.evento
     ADD CONSTRAINT evento_pkey PRIMARY KEY (id);
-
-CREATE INDEX idx_punto_red_activo ON catalogo.punto_red USING btree (activo) WHERE activo;
 
 CREATE INDEX idx_punto_red_ciudad ON catalogo.punto_red USING btree (ciudad_codigo);
 

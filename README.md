@@ -40,6 +40,22 @@ Lo que **no** cambia y por qué: las 12 entidades del Sprint 2 conservan sus lla
 relaciones. Los ajustes sobre ellas son restricciones e índices (no cambian el MER) y se
 listan en la tabla del script.
 
+### Script (`schema.sql`)
+
+Además de las tablas, llaves, índices y semilla de M1–M5:
+
+| # | Cambio | Sprint 2 | Sprint 3 | Motivo |
+|---|---|---|---|---|
+| S1 | **Cronología del envío** | El primer evento solo se comparaba con `ultimo_evento_en`, nulo en un envío nuevo: un envío podía quedar admitido antes de registrarse | CHECK `ck_envio_cronologia` (`admitido_en` y `cerrado_en` ≥ `registrado_en`) y la misma validación en `trg_evento_validar` con mensaje claro | Ningún movimiento puede ser anterior al registro. El tiempo de mostrador de HU-05 (`admitido_en − registrado_en`) salía negativo. |
+| S2 | **Entrega = cierre** | `ck_envio_cierre`: si hay entrega, hay cierre (sin importar cuándo) | `ck_envio_entrega_es_cierre`: `entregado_en = cerrado_en` | Las dos fechas las escribe el mismo evento. Si difieren, HU-05 y HU-06 miden contra fechas distintas. |
+| S3 | **Teléfono con dígitos** | `telefono` solo debía no estar vacío | CHECK de al menos 7 dígitos | `rastrear()` (HU-03) verifica los últimos 4 dígitos. Un teléfono "N/A" dejaba al destinatario sin forma de rastrear. |
+| S4 | **Índice sin uso eliminado** | `idx_punto_red_activo (activo) WHERE activo` | Eliminado | Indexaba un booleano casi constante; ninguna consulta ni trigger lo usaba y solo costaba escrituras. |
+| S5 | **Índices de las tablas nuevas** | — | `idx_ruta_tramo_destino`, `idx_sesion_usuario`, `idx_sesion_abierta` (parcial) | Cubren las FK que no son prefijo de una PK y el cierre de sesiones vencidas. |
+
+Verificado contra un PostgreSQL 16 vacío: el script corre sin errores, un envío completo
+llega a `ENTREGADO`, y los tres casos inválidos (evento anterior al registro, teléfono "N/A",
+entrega con fecha distinta del cierre) son rechazados.
+
 ## 2. Modelo entidad-relación refinado
 
 ```mermaid
@@ -229,7 +245,7 @@ roles y cero o más sesiones; un usuario sin rol existe pero no puede operar (el
 
 ## 3. Modelo físico
 
-[`schema.sql`](schema.sql) es el script único (tres schemas, 12 tablas, índices,
+[`schema.sql`](schema.sql) es el script único (cuatro schemas, 16 tablas, índices,
 triggers, vistas, RLS y roles), ejecutable de punta a punta contra un proyecto
 Postgres/Supabase vacío:
 
@@ -237,7 +253,8 @@ Postgres/Supabase vacío:
 psql "$DATABASE_URL" -v ON_ERROR_STOP=1 -f schema.sql
 ```
 
-Lo que sigue documenta las 12 tablas tal como las crea el script. Los roles son
+Lo que sigue documenta las 16 tablas tal como las crea el script. Lo nuevo o
+modificado en el Sprint 3 lleva el código del cambio (**S1**, **M1**…). Los roles son
 `NOLOGIN`: la contraseña y el `LOGIN` se asignan fuera del repo.
 
 **Convenciones.** `PK` llave primaria, `FK →` llave foránea, `UK` única, `NN` `NOT NULL`.
@@ -320,7 +337,9 @@ CHECK de tabla: `NOT (es_inicial AND es_final)`; `(resultado IS NOT NULL) = es_f
 | `activo` | boolean | NN, DEFAULT `true` |
 | `creado_en` | timestamptz | NN, DEFAULT `now()` |
 
-Índices: `idx_punto_red_ciudad (ciudad_codigo)`, `idx_punto_red_activo (activo) WHERE activo`.
+Índice: `idx_punto_red_ciudad (ciudad_codigo)`. **S4:** se eliminó `idx_punto_red_activo`, un
+índice sobre un booleano casi siempre `true` que ninguna consulta usaba (el trigger busca el
+punto por `id`, que ya tiene PK).
 
 **`catalogo.sla_servicio`**
 
@@ -341,6 +360,20 @@ CHECK de tabla: `NOT (es_inicial AND es_final)`; `(resultado IS NOT NULL) = es_f
 Trigger `trg_transicion_coherente`: el estado inicial no puede ser destino y un
 estado final no puede ser origen.
 
+**`catalogo.ruta_tramo`** (**M1**, red de rutas: tramo dirigido entre dos ciudades)
+
+| Columna | Tipo | Restricciones |
+|---|---|---|
+| `ciudad_origen_codigo` | text | **PK** (1/2), **FK →** `catalogo.ciudad(codigo)` |
+| `ciudad_destino_codigo` | text | **PK** (2/2), **FK →** `catalogo.ciudad(codigo)` |
+| `horas` | integer | NN, CHECK `horas > 0` |
+| `activo` | boolean | NN, DEFAULT `true` (cerrar un tramo sin borrarlo) |
+
+CHECK de tabla `ck_ruta_tramo_distinto`: `ciudad_origen_codigo <> ciudad_destino_codigo`.
+Índice: `idx_ruta_tramo_destino (ciudad_destino_codigo)`, para la FK y para buscar qué tramos
+llegan a una ciudad (la PK ya cubre los que salen). La semilla trae 10 tramos (5 en cada sentido)
+entre las 4 ciudades.
+
 ### Schema `envios` (ciclo de vida del envío)
 
 **`envios.envio`** (HU-01, HU-03, HU-05, HU-06)
@@ -360,13 +393,16 @@ estado final no puede ser origen.
 | `ultimo_evento_en` | timestamptz | |
 | `ultimo_punto_id` | uuid | **FK →** `catalogo.punto_red(id)` |
 | `cerrado_en` | timestamptz | |
-| `entregado_en` | timestamptz | CHECK de tabla `ck_envio_cierre`: `entregado_en IS NULL OR cerrado_en IS NOT NULL` |
+| `entregado_en` | timestamptz | **S2:** CHECK de tabla `ck_envio_entrega_es_cierre`: `entregado_en IS NULL OR entregado_en = cerrado_en` (reemplaza a `ck_envio_cierre`) |
 | `actualizado_en` | timestamptz | NN, DEFAULT `now()`; lo sella `trg_envio_actualizado` en cada `UPDATE` |
 
 Índices: `idx_envio_registrado_en`, `idx_envio_origen (punto_origen_id, registrado_en)`,
 `idx_envio_destino`, `idx_envio_estado`, `idx_envio_tipo_servicio`, `idx_envio_operador`,
 `idx_envio_ultimo_punto`, `idx_envio_en_red (ultimo_evento_en) WHERE cerrado_en IS NULL`.
 Trigger diferido `trg_envio_completo`: al hacer `COMMIT` el envío debe tener 2 partes y ≥ 1 paquete.
+**S1:** CHECK de tabla `ck_envio_cronologia`: `admitido_en` y `cerrado_en`, si existen, son
+`>= registrado_en` (ningún movimiento antes del registro). `trg_evento_validar` hace la misma
+comprobación antes, para devolver un mensaje claro en lugar del nombre de la restricción.
 
 **`envios.parte`** (remitente y destinatario)
 
@@ -378,7 +414,7 @@ Trigger diferido `trg_envio_completo`: al hacer `COMMIT` el envío debe tener 2 
 | `nombre` | text | NN, CHECK `length(btrim(nombre)) > 0` |
 | `tipo_documento` | text | CHECK `IN ('CC','CE','NIT','PAS')` |
 | `documento` | text | CHECK de tabla: `(tipo_documento IS NULL) = (documento IS NULL)` |
-| `telefono` | text | NN, CHECK `length(btrim(telefono)) > 0` |
+| `telefono` | text | NN, **S3:** CHECK al menos 7 dígitos (`length(regexp_replace(telefono, '\D', '', 'g')) >= 7`) |
 | `email` | text | CHECK formato `x@y.z` si no es nulo |
 | `direccion` | text | NN, CHECK `length(btrim(direccion)) > 0` |
 | `ciudad_codigo` | text | **FK →** `catalogo.ciudad(codigo)`, NN |
@@ -431,9 +467,42 @@ UK: `(envio_id, consecutivo)`. Índice: `idx_paquete_envio`.
 Triggers: `trg_evento_validar` (BEFORE INSERT: transición legal, orden cronológico, punto activo, receptor y observaciones),
 `trg_evento_aplicar_estado` (AFTER INSERT: actualiza `envio`) y `trg_evento_inmutable` (bloquea `UPDATE` y `DELETE`).
 
+### Schema `acceso` (usuarios y sesiones, HU-08)
+
+**`acceso.usuario`** (**M2**)
+
+| Columna | Tipo | Restricciones |
+|---|---|---|
+| `username` | text | **PK**, **FK →** `catalogo.operador(codigo)` (el `sub` del token) |
+| `password_hash` | text | NN, CHECK formato BCrypt (`$2a$`/`$2b$`/`$2y$` + costo + 53 caracteres) |
+| `activo` | boolean | NN, DEFAULT `true` (se desactiva, no se borra) |
+| `creado_en` | timestamptz | NN, DEFAULT `now()` |
+
+**`acceso.usuario_rol`** (**M3**)
+
+| Columna | Tipo | Restricciones |
+|---|---|---|
+| `username` | text | **PK** (1/2), **FK →** `acceso.usuario(username)` `ON DELETE RESTRICT` |
+| `rol` | text | **PK** (2/2), CHECK `IN ('OPERADOR','ADMIN')` |
+
+**`acceso.sesion`** (**M4**)
+
+| Columna | Tipo | Restricciones |
+|---|---|---|
+| `jti` | text | **PK**, CHECK `length(btrim(jti)) > 0` (claim `jti` del token) |
+| `username` | text | **FK →** `acceso.usuario(username)` `ON DELETE RESTRICT`, NN |
+| `creada_en` | timestamptz | NN, DEFAULT `now()` |
+| `ultima_actividad_en` | timestamptz | NN, DEFAULT `now()`, CHECK `>= creada_en` |
+| `expira_en` | timestamptz | NN, CHECK `> creada_en` |
+| `cerrada_en` | timestamptz | CHECK `IS NULL OR >= creada_en`; nulo = sesión abierta |
+
+Índices: `idx_sesion_usuario (username)` (FK, sesiones de un usuario) e
+`idx_sesion_abierta (expira_en) WHERE cerrada_en IS NULL` (el cierre periódico de sesiones
+vencidas solo recorre las abiertas).
+
 ### Normalización
 
-Once de las 12 tablas cumplen BCNF: todo determinante es llave candidata. `eventos.evento` queda en 2FN por dos desnormalizaciones deliberadas:
+Quince de las 16 tablas cumplen BCNF: todo determinante es llave candidata. `eventos.evento` queda en 2FN por dos desnormalizaciones deliberadas:
 
 - `tracking_number` depende de `envio_id` y no de la llave `id`: dependencia transitiva, así que `evento` no está en 3FN. Se copia a propósito para que MS-Eventos consulte por número sin cruzar al schema de MS-Envíos. No puede divergir: `trg_evento_validar` la sobrescribe en cada `INSERT` con el valor del envío y el historial es inmutable.
 - `cierra_envio` depende de `estado_resultante` (`es_final`). Se guarda para poder declarar el único parcial `uq_evento_cierre` sin cablear el código del evento de entrega. También la fija el trigger.
@@ -442,6 +511,9 @@ Otras decisiones que conviene dejar explícitas:
 
 - `envio.horas_sla` y las columnas de caché (`estado_actual`, `ultimo_evento_en`, `ultimo_punto_id`, `admitido_en`, `cerrado_en`, `entregado_en`) repiten información derivable de `sla_servicio` y de `evento`, pero dentro de la relación `envio` ninguna determina a otra: todas dependen solo de `id`, por lo que `envio` cumple BCNF. `horas_sla` es una foto del SLA vigente al alta (cambiar el SLA no debe reescribir el pasado). La caché la mantiene `trg_evento_aplicar_estado` y la vista `eventos.v_envio_incoherente` detecta cualquier deriva.
 - `parte` conserva nombre, teléfono y documento por envío, sin tabla `persona`. `documento → nombre` no se declara como dependencia: es la foto de lo que se declaró en ese envío, y ninguna HU pide reutilizar contactos. Si aparece esa necesidad, ahí se normaliza.
+- Las cuatro tablas nuevas están en BCNF: en `ruta_tramo` y `sesion` todo atributo depende solo
+  de la PK, y `usuario_rol` es toda llave. Los roles van en tabla aparte justamente para no
+  guardar una lista ("OPERADOR ADMIN") en una columna, que violaría 1FN.
 - Las tablas con dos llaves candidatas (`envio`, `punto_red`, `parte`, `paquete`, `ciudad`) las tienen disjuntas, así que ahí la diferencia entre 3FN y BCNF no aparece.
 
 ## 4. Roles y seguridad

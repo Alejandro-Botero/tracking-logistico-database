@@ -144,6 +144,59 @@ GROUP BY punto
 ORDER BY eventos DESC;
 
 -- ---------------------------------------------------------------------
+-- SPRINT 3
+-- ---------------------------------------------------------------------
+
+-- S3-1 · HU-03 · ¿Qué ve el destinatario al rastrear su envío con el número y el segundo factor?
+-- (reemplazar el número y los 4 últimos dígitos del teléfono o del documento del destinatario)
+SELECT tracking_number,
+       estado_nombre AS estado,
+       ultimo_punto,
+       ultimo_punto_ciudad,
+       ultimo_evento_en,
+       sin_movimientos
+FROM envios.rastrear('FDX000000012345', '4567');
+
+-- S3-2 · HU-05 · ¿Los tramos entre ciudades tardan más de lo que dice la red de rutas?
+-- (usa catalogo.ruta_tramo; la puede correr ms_eventos o el dueño, rol_lectura no lee esa tabla)
+SELECT co.nombre                                    AS ciudad_origen,
+       cd.nombre                                    AS ciudad_destino,
+       rt.horas                                     AS horas_ruta,
+       COUNT(*)                                     AS envios,
+       ROUND(AVG(t.horas)::numeric, 2)              AS horas_reales_promedio,
+       ROUND(AVG(t.horas)::numeric - rt.horas, 2)   AS exceso_promedio
+FROM eventos.v_tramo t
+JOIN catalogo.punto_red po  ON po.codigo = t.punto_origen
+JOIN catalogo.punto_red pd  ON pd.codigo = t.punto_destino
+JOIN catalogo.ciudad co     ON co.codigo = po.ciudad_codigo
+JOIN catalogo.ciudad cd     ON cd.codigo = pd.ciudad_codigo
+JOIN catalogo.ruta_tramo rt ON rt.ciudad_origen_codigo  = po.ciudad_codigo
+                           AND rt.ciudad_destino_codigo = pd.ciudad_codigo
+WHERE t.tipo_tramo = 'TRANSITO'
+  AND rt.activo
+GROUP BY co.nombre, cd.nombre, rt.horas
+ORDER BY exceso_promedio DESC;
+
+-- S3-3 · HU-08 · ¿Qué sesiones están abiertas, de quién y cuánto llevan inactivas?
+SELECT s.username,
+       s.creada_en,
+       s.ultima_actividad_en,
+       s.expira_en,
+       ROUND(EXTRACT(epoch FROM (now() - s.ultima_actividad_en)) / 60) AS minutos_inactiva,
+       (s.expira_en < now())                                           AS vencida
+FROM acceso.sesion s
+WHERE s.cerrada_en IS NULL
+ORDER BY s.ultima_actividad_en;
+
+-- S3-4 · HU-08 · ¿Qué usuarios tienen cada rol de aplicación y están activos?
+SELECT ur.rol,
+       u.username,
+       u.activo
+FROM acceso.usuario u
+JOIN acceso.usuario_rol ur ON ur.username = u.username
+ORDER BY ur.rol, u.username;
+
+-- ---------------------------------------------------------------------
 -- VERIFICACIONES DE INTEGRIDAD (resultado sano: cero filas)
 -- ---------------------------------------------------------------------
 
@@ -152,3 +205,21 @@ SELECT * FROM eventos.v_envio_incoherente;
 
 -- V-2 · ¿Alguna tabla quedó sin RLS, sin política o abierta a PUBLIC?
 SELECT * FROM catalogo.verificar_rls();
+
+-- V-3 · HU-02 · ¿Algún envío pasó de una ciudad a otra sin un tramo en la red de rutas?
+-- (no filtra por activo: un tramo cerrado después no invalida el historial que pasó por él)
+SELECT t.tracking_number,
+       co.nombre   AS ciudad_origen,
+       cd.nombre   AS ciudad_destino,
+       t.llegada_en
+FROM eventos.v_tramo t
+JOIN catalogo.punto_red po ON po.codigo = t.punto_origen
+JOIN catalogo.punto_red pd ON pd.codigo = t.punto_destino
+JOIN catalogo.ciudad co    ON co.codigo = po.ciudad_codigo
+JOIN catalogo.ciudad cd    ON cd.codigo = pd.ciudad_codigo
+LEFT JOIN catalogo.ruta_tramo rt ON rt.ciudad_origen_codigo  = po.ciudad_codigo
+                                AND rt.ciudad_destino_codigo = pd.ciudad_codigo
+WHERE t.tipo_tramo = 'TRANSITO'
+  AND po.ciudad_codigo <> pd.ciudad_codigo
+  AND rt.ciudad_origen_codigo IS NULL
+ORDER BY t.llegada_en;

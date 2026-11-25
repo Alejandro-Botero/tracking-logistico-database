@@ -22,8 +22,8 @@ inicio de sesión).
 ## 1. Cambios respecto al Sprint 2
 
 El Sprint 3 parte del esquema entregado en el Sprint 2 (12 tablas, 3 schemas, 4 roles). Cada
-cambio se identifica con un código (`M` modelo, `S` script, `R` roles) que se repite en la
-sección donde se detalla. El historial del Sprint 1 al Sprint 2 quedó en el
+cambio se identifica con un código (`M` modelo, `S` script, `R` roles, `T` triggers, `F` funciones,
+`Q` consultas, `P` pruebas) que se repite en la sección donde se detalla. El historial del Sprint 1 al Sprint 2 quedó en el
 [anexo](#anexo-cambios-del-sprint-1-al-sprint-2).
 
 ### MER
@@ -66,6 +66,17 @@ entrega con fecha distinta del cierre) son rechazados.
 | R4 | **`EXECUTE` explícito sobre funciones** | Las 16 funciones tenían `EXECUTE` para `PUBLIC` (el permiso por defecto de Postgres), incluidas `rastrear()` y `registrar_operador()` (`SECURITY DEFINER`). `ms_eventos` tenía un `GRANT` inútil sobre `tracking_valido()` | `ALTER DEFAULT PRIVILEGES REVOKE EXECUTE ON FUNCTIONS FROM PUBLIC` + `REVOKE ALL ON ALL FUNCTIONS`. Cada rol recibe `EXECUTE` solo sobre lo que invoca; `rol_admin` sobre todas | Una función abierta a `PUBLIC` solo estaba protegida por no tener `USAGE` sobre el schema. Los procedimientos que se agreguen en adelante nacen cerrados y necesitan `GRANT EXECUTE` explícito. |
 | R5 | **RLS en las tablas nuevas** | 12 tablas con RLS | 16 tablas con RLS. `p_ruta_lectura`, `p_usuario_lectura`, `p_usuario_rol_lectura` y tres políticas sobre `sesion` que filtran filas (solo se inserta abierta y solo se actualiza abierta). `p_admin` se extiende a `acceso` | Sin política, una tabla con RLS niega todo; con `USING (cerrada_en IS NULL)` una sesión cerrada no se puede reabrir. |
 | R6 | **`verificar_rls()` ampliada** | Revisaba RLS y `GRANT` a `PUBLIC` en tablas de 3 schemas | Revisa 4 schemas y además funciones con `EXECUTE` para `PUBLIC` y funciones `SECURITY DEFINER` sin `search_path` fijo | La comprobación automática cubre los objetos nuevos. Debe devolver cero filas. |
+
+### Triggers, funciones y consultas
+
+| # | Cambio | Sprint 2 | Sprint 3 | Motivo |
+|---|---|---|---|---|
+| T1 | **Triggers documentados por HU** | Los 7 triggers existían pero el README no los documentaba | Sección [8](#8-triggers): cada uno con su tabla, evento, momento, HU y propósito | Que cada regla de negocio de la base se pueda rastrear hasta la historia de usuario que la pide. |
+| T2 | **`trg_evento_validar` ampliado** | Comparaba el primer evento solo con `ultimo_evento_en`, nulo en un envío nuevo | También rechaza un evento anterior a `registrado_en` (ver **S1**) | Ningún movimiento puede ser anterior al registro del envío. |
+| F1 | **Funciones documentadas por HU** | Sin sección propia | Sección [9](#9-funciones): parámetros, resultado y ejemplo de llamada de cada una | Que se pueda invocar cada función sin leer el script. Los permisos de `EXECUTE` están en **R4**. |
+| F2 | **`verificar_rls()` ampliada** | Revisaba RLS y `GRANT` a `PUBLIC` en tablas de 3 schemas | Cubre 4 schemas y funciones abiertas a `PUBLIC` (ver **R6**) | La verificación automática cubre los objetos nuevos. |
+| Q1 | **Consultas: de 15 a 20** | 15 consultas (S1-1 a S2-8, V-1 y V-2) | Se agregan `S3-1` a `S3-4` y `V-3` | Cubren lo nuevo del Sprint 3: rastreo con segundo factor (HU-03), red de rutas (HU-05 y HU-02) y sesiones y usuarios (HU-08). |
+| P1 | **`pruebas.sql`** | No existía | Script que prueba cada trigger y cada función con datos de ejemplo y se revierte al final | Evidencia de que los triggers y las funciones se comportan como dice el README. |
 
 ## 2. Modelo entidad-relación refinado
 
@@ -757,7 +768,7 @@ Con `schema.sql` ejecutado en un PostgreSQL 16 vacío se comprobó con cada rol 
 
 ## 5. Consultas
 
-Hay 15 consultas sobre `schema.sql`: 5 de las historias del Sprint 1 (HU-01 a HU-03), 8 del Sprint 2 (HU-04 a HU-07) y 2 de verificación de integridad. Usan filtros, agregaciones y joins, y cada una indica la pregunta de negocio que responde. El SQL está en [consultas.sql](consultas.sql) y la descripción de cada consulta en [docs/consultas.md](docs/consultas.md).
+Hay 20 consultas sobre `schema.sql`: 5 de las historias del Sprint 1 (HU-01 a HU-03), 8 del Sprint 2 (HU-04 a HU-07), 4 del Sprint 3 (HU-03, HU-05 y HU-08) y 3 de verificación de integridad. Usan filtros, agregaciones y joins, y cada una indica en un comentario la pregunta de negocio y la HU que responde. El SQL está en [consultas.sql](consultas.sql) y la descripción de cada consulta en [docs/consultas.md](docs/consultas.md).
 
 ---
 
@@ -784,6 +795,90 @@ Calculamos el almacenamiento y los índices de `eventos.evento`, el costo en pá
 
 ---
 
+## 8. Triggers
+
+La base tiene 7 triggers. Los de `envios.envio` y `eventos.evento` protegen las reglas del negocio aunque el rol que escribe tenga permiso; el de `catalogo.transicion_valida` protege la máquina de estados. Cada uno se prueba en [pruebas.sql](pruebas.sql).
+
+| Trigger | Tabla | Evento | Momento | HU | Propósito |
+|---|---|---|---|---|---|
+| `trg_envio_sla` (`envios.fijar_sla`) | `envios.envio` | INSERT | BEFORE | HU-01 | Copia al envío el SLA vigente de su tipo de servicio (`horas_sla`). Si el servicio no tiene SLA vigente, rechaza el alta. Así cambiar el SLA hoy no reescribe el juicio sobre los envíos de ayer (HU-05 y HU-06). |
+| `trg_envio_completo` (`envios.verificar_envio_completo`) | `envios.envio` | INSERT | AFTER, diferido al COMMIT | HU-01 | Rechaza el envío que no tenga exactamente 2 partes (remitente y destinatario) y al menos 1 paquete. Es diferido para poder insertar el envío y sus partes en la misma transacción. |
+| `trg_envio_actualizado` (`envios.sellar_actualizacion`) | `envios.envio` | UPDATE | BEFORE | HU-01 | Sella `actualizado_en` en cada modificación, para saber cuándo se corrigió por última vez un envío. |
+| `trg_evento_validar` (`eventos.validar_evento`) | `eventos.evento` | INSERT | BEFORE | HU-02 | Valida el evento antes de guardarlo: el envío existe, no es anterior al registro ni al último movimiento, el punto está activo, la transición está permitida en `transicion_valida`, la entrega trae quién recibió y las excepciones traen observación. Copia el `tracking_number` y resuelve `estado_resultante`. |
+| `trg_evento_aplicar_estado` (`eventos.aplicar_estado_envio`) | `eventos.evento` | INSERT | AFTER | HU-03 | Propaga el evento al envío en la misma transacción: estado, último punto, último movimiento, admisión, cierre y entrega. Permite que el rastreo responda en una sola lectura. |
+| `trg_evento_inmutable` (`eventos.bloquear_modificacion`) | `eventos.evento` | UPDATE, DELETE | BEFORE | HU-04 | Bloquea cualquier cambio o borrado: el historial que ve el cliente es de solo inserción. Una corrección se registra como un evento nuevo. |
+| `trg_transicion_coherente` (`catalogo.verificar_transicion`) | `catalogo.transicion_valida` | INSERT, UPDATE | BEFORE | HU-02 | Impide cargar una regla incoherente: el estado inicial no puede ser destino, y un estado final no puede tener transiciones de salida. |
+
+Orden de ejecución al registrar un evento: `trg_evento_validar` (BEFORE) → inserción → `trg_evento_aplicar_estado` (AFTER), que actualiza `envios.envio` y dispara `trg_envio_actualizado`.
+
+---
+
+## 9. Funciones
+
+Las funciones se invocan con `SELECT`. Ninguna nace abierta: cada rol recibe `EXECUTE` solo sobre las que usa (ver **R4** y la sección 4). Se prueban en [pruebas.sql](pruebas.sql).
+
+| Función | Parámetros | Resultado | HU | `EXECUTE` |
+|---|---|---|---|---|
+| `envios.gen_tracking_number()` | — | `text`: `FDX` + 12 dígitos | HU-01 | `ms_envios` |
+| `envios.tracking_valido(p_tracking)` | `text` | `boolean` | HU-01, HU-03 | `ms_envios` |
+| `catalogo.sla_horas(p_tipo_servicio, p_momento)` | `text`, `timestamptz` (por defecto `now()`) | `integer`: horas, o `NULL` si no hay SLA | HU-01, HU-05 | `ms_envios` |
+| `envios.rastrear(p_tracking, p_verificacion)` | `text`, `text` (4 dígitos) | filas de `v_envio_publico` (0 o 1) | HU-03 | `ms_envios` |
+| `catalogo.registrar_operador(p_codigo, p_nombre)` | `text`, `text` (opcional) | `text`: el código | HU-01, HU-02 | `ms_envios`, `ms_eventos` |
+| `eventos.refrescar_reportes()` | — | `void` | HU-07 | `ms_eventos` |
+| `catalogo.verificar_rls()` | — | tabla `(schema_tabla, problema)` | seguridad (R6) | `rol_admin` |
+
+Todas las demás funciones del script son de apoyo y no se llaman directamente: `envios.digito_verificador()` y `envios.mezclar_secuencia()` arman el número de seguimiento, y `catalogo.estado_inicial()` es el `DEFAULT` del estado de `envios.envio`. Las funciones de trigger son las de la sección 8.
+
+### Ejemplos de llamada
+
+**`gen_tracking_number()`** — número único y no correlativo: la secuencia garantiza la unicidad y una mezcla de 4 rondas evita que el rastreo público se pueda enumerar.
+
+```sql
+SELECT envios.gen_tracking_number();
+-- FDX + 10 dígitos + 2 dígitos verificadores (15 caracteres)
+```
+
+**`tracking_valido()`** — revisa el formato y el dígito verificador. Es el CHECK de `envios.envio`.
+
+```sql
+SELECT envios.tracking_valido('FDX000000000000');   -- false: el dígito verificador no coincide
+```
+
+**`sla_horas()`** — SLA vigente de un servicio en un momento dado, con la hora de Colombia. Lo usa `trg_envio_sla` al registrar un envío.
+
+```sql
+SELECT catalogo.sla_horas('EXPRESS');                  -- 24
+SELECT catalogo.sla_horas('ESTANDAR', '2026-03-01');   -- 96
+SELECT catalogo.sla_horas('ESTANDAR', '2026-08-01');   -- 72
+```
+
+**`rastrear()`** — rastreo público con segundo factor: el número de seguimiento y los 4 últimos dígitos del teléfono o del documento del destinatario. Si no coinciden devuelve cero filas, sin decir cuál de los dos datos falló.
+
+```sql
+SELECT estado_nombre, ultimo_punto, ultimo_punto_ciudad, ultimo_evento_en
+FROM envios.rastrear('FDX000000012345', '4567');
+```
+
+**`registrar_operador()`** — alta idempotente del operador que viene en el token. Es `SECURITY DEFINER`: presta el permiso de escritura sobre el catálogo sin dárselo al microservicio. Llamarla dos veces no falla, y una llamada sin nombre no borra el nombre guardado.
+
+```sql
+SELECT catalogo.registrar_operador('op-123', 'Ana Pérez');   -- 'op-123'
+```
+
+**`refrescar_reportes()`** — actualiza las dos vistas materializadas de volumen (HU-07) sin bloquear las lecturas. Hay que llamarla antes de la consulta S2-6, y programarla cada hora o al cierre del día.
+
+```sql
+SELECT eventos.refrescar_reportes();
+```
+
+**`verificar_rls()`** — revisa la seguridad de los 4 schemas. Lo esperado es cero filas.
+
+```sql
+SELECT * FROM catalogo.verificar_rls();
+```
+
+---
+
 ## Estructura del repo
 
 ```
@@ -791,6 +886,7 @@ Calculamos el almacenamiento y los índices de `eventos.evento`, el costo en pá
 ├── README.md
 ├── schema.sql
 ├── consultas.sql
+├── pruebas.sql
 └── docs/
     ├── consultas.md
     └── analisis-almacenamiento.md

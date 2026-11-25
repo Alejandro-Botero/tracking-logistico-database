@@ -1,8 +1,8 @@
-# Consultas de los dos primeros sprints
+# Consultas de los tres sprints
 
 [← Volver al README](../README.md)
 
-Las consultas se ejecutan sobre los objetos que crea `schema.sql` y cada una responde una pregunta de negocio. Las del Sprint 1 comprueban lo que registran HU-01, HU-02 y HU-03; las del Sprint 2 cubren HU-04 a HU-07. HU-08 (inicio y cierre de sesión) no tiene consultas porque la autenticación la resuelve el proveedor de identidad y la base solo guarda al operador en `catalogo.operador`.
+Las consultas se ejecutan sobre los objetos que crea `schema.sql` y cada una responde una pregunta de negocio. Las del Sprint 1 comprueban lo que registran HU-01, HU-02 y HU-03; las del Sprint 2 cubren HU-04 a HU-07; las del Sprint 3 cubren lo que cambió en el esquema: el rastreo con segundo factor (HU-03), la red de rutas (HU-05) y las sesiones y usuarios del inicio de sesión (HU-08).
 
 El SQL de todas está en [`consultas.sql`](../consultas.sql), en el mismo orden. Los ejemplos usan el número de seguimiento `FDX000000012345` y periodos de octubre de 2026, así que hay que cambiarlos por datos que existan.
 
@@ -62,6 +62,24 @@ La vista materializada solo está tan fresca como su último refresco; para cont
 
 Eventos y envíos distintos por punto, desde `v_volumen_movimiento`.
 
+## Sprint 3
+
+### S3-1 · HU-03 · ¿Qué ve el destinatario al rastrear su envío con el número y el segundo factor?
+
+Llama a `envios.rastrear(número, últimos 4 dígitos)`, que devuelve la fila de `v_envio_publico` solo si el segundo factor coincide con el teléfono o el documento del destinatario. Si no coincide devuelve cero filas, sin decir cuál de los dos datos falló.
+
+### S3-2 · HU-05 · ¿Los tramos entre ciudades tardan más de lo que dice la red de rutas?
+
+Compara el tiempo real de cada salto de `v_tramo` (solo `TRANSITO` entre ciudades distintas) con las horas de `catalogo.ruta_tramo`. Une seis tablas y agrupa por par de ciudades. `rol_lectura` no tiene permiso sobre `ruta_tramo`, así que la corre `ms_eventos` o el dueño.
+
+### S3-3 · HU-08 · ¿Qué sesiones están abiertas, de quién y cuánto llevan inactivas?
+
+Lista las sesiones con `cerrada_en` nulo y marca cuáles ya pasaron su `expira_en`. Sirve para decidir cuáles cerrar.
+
+### S3-4 · HU-08 · ¿Qué usuarios tienen cada rol de aplicación y están activos?
+
+Une `usuario` con `usuario_rol`. Un usuario con dos roles aparece dos veces.
+
 ## Verificaciones de integridad
 
 ### V-1 · ¿El estado guardado en cada envío coincide con su historial de eventos?
@@ -71,3 +89,7 @@ Eventos y envíos distintos por punto, desde `v_volumen_movimiento`.
 ### V-2 · ¿Alguna tabla quedó sin RLS, sin política o abierta a PUBLIC?
 
 Función que revisa la seguridad del esquema. Lo esperado es cero filas.
+
+### V-3 · HU-02 · ¿Algún envío pasó de una ciudad a otra sin un tramo en la red de rutas?
+
+Busca saltos `TRANSITO` entre ciudades distintas que no tengan fila en `ruta_tramo`. No filtra por `activo`: un tramo cerrado después no invalida el historial que pasó por él. Lo esperado es cero filas.
